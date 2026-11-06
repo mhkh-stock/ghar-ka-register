@@ -1,1609 +1,1499 @@
-// Personal Card Vault — app shell (browser only).
-// Phase 2: the reel-exact glass frontend (Code XR "Glassy Payment Checkout
-// V2" look) + Intelligence (paste-an-SMS direct update) + two-factor auth.
-// The element IDs and flows stay the same as Phase 1.
-// Storage: localStorage only. Keys: pcv.vault (encrypted envelope JSON),
-// pcv.lockout (failure count + lockoutUntil), pcv.backup (SHA-256 hashes of
-// the one-time backup codes — never the codes themselves). The CryptoKey
-// lives in memory only and is wiped on lock. The server stores NOTHING.
+// Ghar ka Register — app shell (browser only).
+// Wires the setup/unlock screens, hash routing (nav.js), page rendering
+// (model.js) and the encrypted vault (vault.js). No page is reachable
+// while locked. Nothing here is fetched, checked or looked up anywhere:
+// every record is shown as you entered it, and every figure shows its
+// working. A v1 vault (the old Card Vault) is NOT migrated — first run
+// creates a fresh v2 vault; an old backup restores only into the old code.
 'use strict';
-/* global VaultCrypto, VaultModel, SmsParser, CsvImport, Cards, Intel, Proof, Ocr, Totp */
 (function () {
-  var LS_VAULT = 'pcv.vault';
-  var LS_LOCKOUT = 'pcv.lockout';
+  var VaultCrypto = window.VaultCrypto;
+  var GharModel = window.GharModel;
+  var Nav = window.Nav;
+
+  var LS_VAULT = 'ghar-register-vault';
+  var LS_LOCKOUT = 'ghar-register-lockout';
 
   var state = {
-    key: null, envelope: null, vault: null, passphrase: '',
+    envelope: null,
+    key: null,
+    vault: null,
     lockout: VaultCrypto.createLockoutState(),
-    lastActive: Date.now(), hideBalances: false,
-    smsDraft: null, csvDraft: null,
-    selectedAccountId: null, intelUndo: null,
-    editingAccountId: null, pendingDeleteId: null, pendingProofRemoveId: null,
-    addProof: null, addProofBalance: null, addScreenshot: null, reconcileSkipped: {},
-    pending2fa: null, twoFaSetup: null,
-    currentPage: 'wallet', profileDpDataUrl: null,
+    lastActiveMs: 0,
+    pendingImport: null,
+    pendingDeleteBillId: null,
+    pendingDocPhoto: null,
+    pendingDeleteDocId: null,
+    pendingDeleteMedId: null,
+    currentPage: 'home',
   };
 
-  // Backup-code hashes live OUTSIDE the vault (localStorage) so a code can
-  // be checked while the vault is still locked. Only hashes, never codes.
-  var LS_BACKUP = 'pcv.backup';
-  function loadBackupHashes() {
-    try {
-      var raw = localStorage.getItem(LS_BACKUP);
-      if (!raw) return [];
-      var o = JSON.parse(raw);
-      return Array.isArray(o.hashes) ? o.hashes : [];
-    } catch (_e) { return []; }
-  }
-  function saveBackupHashes(hashes) {
-    if (!hashes || !hashes.length) { localStorage.removeItem(LS_BACKUP); return; }
-    localStorage.setItem(LS_BACKUP, JSON.stringify({ hashes: hashes }));
-  }
-
   function $(id) { return document.getElementById(id); }
-  function show(el) { el.classList.remove('hidden'); }
-  function hide(el) { el.classList.add('hidden'); }
   function esc(s) {
-    return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
-      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
-    });
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
-  function fmtRs(n) { return 'Rs ' + Number(n || 0).toLocaleString('en-PK'); }
-  // Unknown balance (Phase 3.5): say so plainly — never "Rs 0" for a number
-// the bank never stated. Hide-balances only masks a real number.
-function maskBal(n) {
-  if (n === null || n === undefined) return 'Balance not set yet';
-  return state.hideBalances ? 'Rs ••••' : fmtRs(n);
-}
+  function setText(id, text) { var el = $(id); if (el) el.textContent = text || ''; }
+  function show(el, on) { if (el) el.classList.toggle('hidden', !on); }
+  function setVal(id, v) { var el = $(id); if (el) el.value = v == null ? '' : v; }
+  function currentMonthKey() { return GharModel.todayStr().slice(0, 7); }
+  function monthInputVal(id) {
+    var el = $(id);
+    if (el && el.value) return el.value;
+    if (el) el.value = currentMonthKey();
+    return currentMonthKey();
+  }
 
+  // ---- storage (envelope + lockout live outside the vault, as before) ----
   function loadStored() {
-    try { state.envelope = JSON.parse(localStorage.getItem(LS_VAULT) || 'null'); } catch (_e) { state.envelope = null; }
     try {
-      var l = JSON.parse(localStorage.getItem(LS_LOCKOUT) || 'null');
-      if (l && typeof l.failures === 'number') state.lockout = l;
-    } catch (_e) { state.lockout = VaultCrypto.createLockoutState(); }
+      var raw = localStorage.getItem(LS_VAULT);
+      if (raw) {
+        var env = JSON.parse(raw);
+        if (env && typeof env === 'object' && typeof env.data === 'string') state.envelope = env;
+      }
+    } catch (_e) { state.envelope = null; }
+    try {
+      var lr = localStorage.getItem(LS_LOCKOUT);
+      if (lr) {
+        var s = JSON.parse(lr);
+        if (s && typeof s.failures === 'number') {
+          state.lockout = { failures: s.failures, lockoutUntil: Number(s.lockoutUntil) || 0 };
+        }
+      }
+    } catch (_e) { /* keep a fresh lockout state */ }
   }
-  function saveEnvelope(env) {
-    state.envelope = env;
-    localStorage.setItem(LS_VAULT, JSON.stringify(env));
+  function saveEnvelope() {
+    try { localStorage.setItem(LS_VAULT, JSON.stringify(state.envelope)); } catch (_e) { /* storage full/blocked */ }
   }
-  function saveLockout() { localStorage.setItem(LS_LOCKOUT, JSON.stringify(state.lockout)); }
-
-  function emptyVault() {
-    return VaultModel.emptyVault();
+  function saveLockout() {
+    try { localStorage.setItem(LS_LOCKOUT, JSON.stringify(state.lockout)); } catch (_e) { /* storage full/blocked */ }
   }
-
   async function persist() {
-    if (!state.key || !state.envelope || !state.vault) return;
-    var env = await VaultCrypto.saveVault(state.key, state.envelope, state.vault);
-    saveEnvelope(env);
+    state.envelope = await VaultCrypto.saveVault(state.key, state.envelope, state.vault);
+    saveEnvelope();
   }
 
-  function showScreen(name) {
-    hide($('setup-screen')); hide($('unlock-screen')); hide($('totp-screen')); hide($('vault-screen'));
-    if (name) show($(name + '-screen'));
+  // ---- screens ----
+  function showScreen(which) {
+    show($('setup-screen'), which === 'setup');
+    show($('unlock-screen'), which === 'unlock');
+    show($('vault-screen'), which === 'vault');
+    var pill = $('lock-pill');
+    if (pill) {
+      pill.textContent = which === 'vault' ? 'Unlocked' : 'Locked';
+      pill.classList.toggle('locked', which !== 'vault');
+    }
+    if (which === 'unlock') updateLockoutNote();
   }
-
-  function lockoutMessage() {
-    if (!VaultCrypto.isLocked(state.lockout, Date.now())) return '';
-    var secs = Math.ceil(VaultCrypto.lockoutRemainingMs(state.lockout, Date.now()) / 1000);
-    return 'Too many wrong PINs. Try again in ' + secs + ' seconds.';
-  }
-
-  function refreshLockoutNote() {
-    var msg = lockoutMessage();
-    var note = $('lockout-note');
-    if (msg) { note.textContent = msg; show(note); } else { hide(note); }
+  function updateLockoutNote() {
+    var el = $('lockout-note');
+    if (!el) return;
+    if (VaultCrypto.isLocked(state.lockout, Date.now())) {
+      var secs = Math.ceil(VaultCrypto.lockoutRemainingMs(state.lockout, Date.now()) / 1000);
+      el.textContent = 'Too many wrong PINs. Wait ' + secs + ' seconds, then try again.';
+      el.classList.remove('hidden');
+    } else {
+      el.classList.add('hidden');
+      el.textContent = '';
+    }
   }
 
   function lock() {
-    state.key = null; state.vault = null; state.passphrase = '';
-    state.smsDraft = null; state.csvDraft = null;
-    state.intelUndo = null; state.pending2fa = null; state.twoFaSetup = null;
-    hideSecuring();
-    closeBell();
-    setLockPill(true);
-    showScreen('unlock');
-    $('unlock-pin').value = ''; $('unlock-pass').value = '';
-    $('unlock-error').textContent = '';
-    $('totp-code').value = ''; $('totp-error').textContent = '';
-    refreshLockoutNote();
+    state.key = null;
+    state.vault = null;
+    state.pendingImport = null;
+    state.pendingDocPhoto = null;
+    state.pendingDeleteDocId = null;
+    state.pendingDeleteMedId = null;
+    setText('doc-photo-note', '');
+    state.lastActiveMs = 0;
+    setVal('unlock-pin', '');
+    setVal('unlock-pass', '');
+    showScreen(state.envelope ? 'unlock' : 'setup');
+  }
+  function markActive() { state.lastActiveMs = Date.now(); }
+  function autoLockCheck() {
+    if (state.key && VaultCrypto.isIdleLocked(state.lastActiveMs, Date.now())) lock();
   }
 
-  function setLockPill(locked) {
-    var pill = $('lock-pill');
-    pill.textContent = locked ? 'Locked' : 'Unlocked';
-    pill.classList.toggle('locked', locked);
-  }
-  function setStep(id, cls, dot) {
-    var el = $(id);
-    el.className = 'step' + (cls ? ' ' + cls : '');
-    var d = el.querySelector('.dot');
-    if (d) d.textContent = dot;
-  }
-  function updateStepper() {
-    var has = !!(state.vault && state.vault.accounts.length > 0);
-    setStep('step-setup', 'done', '✓');
-    setStep('step-add', has ? 'done' : 'active', has ? '✓' : '2');
-    setStep('step-done', has ? 'active' : '', '3');
-  }
-  function markStepperDone() {
-    setStep('step-setup', 'done', '✓');
-    setStep('step-add', 'done', '✓');
-    setStep('step-done', 'done', '✓');
-  }
-  // Reel "Securing your payment" -> "You're all set": the panels blur out
-  // behind the overlay, the card floats centre with a shimmer + a thin green
-  // progress line, then the card turns green.
-  var securingTimers = [];
-  function hideSecuring() {
-    securingTimers.forEach(clearTimeout);
-    securingTimers = [];
-    hide($('securing-overlay'));
-  }
-  function showSecuring(account, doneLabel) {
-    var overlay = $('securing-overlay');
-    var visual = account || { provider: 'Custom', type: 'wallet', nickname: 'Your vault', last4: '', balance: 0 };
-    $('securing-card-slot').innerHTML = Cards.buildCardVisual(visual, { hideBalances: false, selected: true });
-    var cardEl = $('securing-card-slot').querySelector('.card-visual');
-    if (cardEl) cardEl.classList.add('shimmer');
-    $('securing-title').textContent = 'Securing your payment';
-    $('securing-sub').textContent = 'Processing Secure Transaction… · Encrypting card details…';
-    overlay.classList.remove('done');
-    $('securing-progress').style.width = '0';
-    show(overlay);
-    requestAnimationFrame(function () { $('securing-progress').style.width = '100%'; });
-    securingTimers.push(setTimeout(function () {
-      if (cardEl) { cardEl.classList.remove('shimmer'); cardEl.classList.add('success'); }
-      $('securing-title').textContent = "You're all set";
-      $('securing-sub').textContent = doneLabel || 'Saved securely!';
-      overlay.classList.add('done');
-      markStepperDone();
-      var pill = $('lock-pill');
-      pill.textContent = '✓ Saved';
-      pill.classList.remove('locked');
-    }, 1400));
-    securingTimers.push(setTimeout(function () {
-      hideSecuring();
-      if (state.key) { setLockPill(false); updateStepper(); }
-    }, 2400));
-  }
-
-  function render() {
-    if (!state.vault) return;
-    var v = state.vault;
-    // Totals add ONLY known balances (Phase 3.5) — VaultModel.totals()
-    // skips unknown balances and counts them, never as 0.
-    var tot = VaultModel.totals(v);
-    $('total-balance').textContent = (v.accounts.length > 0 && tot.unknownCount === v.accounts.length)
-      ? 'Balance not set yet' : maskBal(tot.total);
-    $('total-unknown').textContent = tot.unknownCount > 0
-      ? ' · ' + tot.unknownCount + (tot.unknownCount === 1 ? ' balance' : ' balances') + ' not set yet' : '';
-    // Card carousel (reel card visual, per-provider gradient). Each card
-    // sits in a slot with its own compact action row (Phase 3.2).
-    var list = $('accounts-list');
-    if (!v.accounts.some(function (a) { return a.id === state.selectedAccountId; })) {
-      state.selectedAccountId = v.accounts.length ? v.accounts[0].id : null;
-    }
-    list.innerHTML = v.accounts.map(function (a, i) {
-      return '<div class="card-slot">' + Cards.buildCardVisual(a, { hideBalances: state.hideBalances, selected: a.id === state.selectedAccountId })
-        + cardActionsHtml(a, i, v.accounts.length) + '</div>';
-    }).join('');
-    list.querySelectorAll('.card-visual').forEach(function (el) {
-      el.addEventListener('click', function () { state.selectedAccountId = el.getAttribute('data-id'); render(); });
-    });
-    $('accounts-empty').classList.toggle('hidden', v.accounts.length > 0);
-    // Summary panel (reel "Order summary"): one row per account + total.
-    var sl = $('summary-list');
-    sl.innerHTML = v.accounts.map(function (a, i) {
-      return '<div class="sum-row"><span class="mark ' + Cards.providerClass(a.provider) + '">'
-        + esc(a.provider.slice(0, 2).toUpperCase()) + '</span><span class="nm">' + esc(a.nickname)
-        + '<span class="sub">' + esc(a.provider) + ' · ' + esc(a.type) + ' •••• ' + esc(a.last4) + '</span></span>'
-        + '<span class="amt">' + esc(maskBal(a.balance)) + '</span>' + Cards.confirmationBadge(a)
-        + sumActionsHtml(a, i, v.accounts.length) + '</div>';
-    }).join('');
-    $('summary-total').textContent = (v.accounts.length > 0 && tot.unknownCount === v.accounts.length)
-      ? 'Balance not set yet' : maskBal(tot.total);
-    $('summary-unknown').textContent = tot.unknownCount > 0
-      ? 'Total across ' + v.accounts.length + (v.accounts.length === 1 ? ' account' : ' accounts')
-        + ' · ' + tot.unknownCount + (tot.unknownCount === 1 ? ' balance' : ' balances') + ' not set yet' : '';
-    $('summary-empty').classList.toggle('hidden', v.accounts.length > 0);
-    // Edit panel (Phase 3.2): visible only while editing one card.
-    $('edit-account-card').classList.toggle('hidden', !state.editingAccountId);
-    $('hide-btn').classList.toggle('on', state.hideBalances);
-    updateStepper();
-    refreshSecuritySettings();
-    var tx = $('txns-list');
-    tx.innerHTML = '';
-    $('txns-empty').classList.toggle('hidden', v.transactions.length > 0);
-    v.transactions.slice().reverse().slice(0, 50).forEach(function (t) {
-      var div = document.createElement('div');
-      div.className = 'txn';
-      div.innerHTML = '<span class="amt">' + (t.direction === 'debit' ? '−' : '+') + ' ' + esc(maskBal(t.amount)) + '</span> · ' +
-        esc(t.merchant || '—') + ' <span class="muted">(' + esc(t.date) + ' · ' + esc(t.source) + ' · ' + esc(t.status) + ')</span>';
-      tx.appendChild(div);
-    });
-    // Notifications live behind the bell, not on a page.
-    renderBell();
-    renderProfileHeader();
-    // Monthly check (Phase 4): banner + done line + the reconcile view.
-    renderReconcile();
-  }
-
-  function renderReconcile() {
-    var v = state.vault;
-    if (!v) return;
-    var due = VaultModel.monthlyCheckDue(v);
-    $('monthly-banner').classList.toggle('hidden', !due);
-    $('monthly-done-line').classList.toggle('hidden', due);
-    if (!due) {
-      $('monthly-done-date').textContent = v.lastReconcileAt || '';
-      var skipped = Number(v.lastReconcileSkipped) || 0;
-      $('monthly-done-skipped').textContent = skipped > 0
-        ? ' — ' + skipped + (skipped === 1 ? ' account' : ' accounts') + ' skipped' : '';
-    }
-    var list = $('reconcile-list');
-    $('reconcile-empty').classList.toggle('hidden', v.accounts.length > 0);
-    list.innerHTML = v.accounts.map(function (a) {
-      var ready = VaultModel.accountCheckReady(a);
-      var skipped = !!state.reconcileSkipped[a.id];
-      var last = VaultModel.lastConfirmedAt(a);
-      var status = ready ? '<span class="pill green">Checked</span>'
-        : skipped ? '<span class="pill">Skipped</span>'
-        : '<span class="pill amber">Needs re-check</span>';
-      return '<div class="rec-row"><span class="nm">' + esc(a.nickname)
-        + '<span class="sub">' + esc(a.provider) + ' · ' + esc(a.type) + ' •••• ' + esc(a.last4)
-        + ' · last confirmed: ' + esc(last || 'never') + '</span></span>'
-        + '<span class="amt">' + esc(maskBal(a.balance)) + '</span>' + Cards.confirmationBadge(a) + status
-        + '<span class="rec-actions">'
-        + '<a href="#/intelligence">Re-check by SMS</a>'
-        + '<label class="rec-upload">Upload statement<input type="file" accept=".pdf,image/*" data-proof-account="' + esc(a.id) + '" class="file-input-hidden"></label>'
-        + (ready ? '' : '<button data-rec-skip="' + esc(a.id) + '">' + (skipped ? 'Unskip' : 'Skip') + '</button>')
-        + '</span></div>';
-    }).join('');
-    var st = VaultModel.monthlyCheckStatus(v, state.reconcileSkipped);
-    $('reconcile-summary').textContent = v.accounts.length === 0 ? ''
-      : st.ready
-        ? (st.skippedCount > 0 ? 'All accounts checked — ' + st.skippedCount + (st.skippedCount === 1 ? ' account' : ' accounts') + ' skipped.' : 'All accounts checked.')
-        : st.pending.length + (st.pending.length === 1 ? ' account' : ' accounts') + ' still need' + (st.pending.length === 1 ? 's' : '') + ' a re-check or a skip.';
-    $('reconcile-done-btn').disabled = !st.ready;
-  }
-
-  // Re-check one account by uploading its statement (Phase 4). This reuses
-  // the Phase 3.3 proof flow (same validation, same match check) — it does
-  // not rebuild it. A screenshot is kept as a record only: it cannot count
-  // as a re-check, because the app cannot read its text.
-  async function onReconcileProof(file, accountId) {
-    var a = VaultModel.findAccount(state.vault, accountId);
-    var err = $('reconcile-error');
-    var ok = $('reconcile-ok');
-    err.textContent = ''; ok.textContent = '';
-    if (!file || !a) return;
-    var dataUrl;
-    try { dataUrl = await readFileAsDataUrl(file); }
-    catch (e) { err.textContent = e.message; return; }
-    var checked = Proof.validateProofData(dataUrl, file.size);
-    if (!checked.ok) { err.textContent = checked.errors.join(' '); return; }
-    var profileName = (state.vault.profile && state.vault.profile.displayName) || '';
-    if (checked.kind === 'image') {
-      VaultModel.attachProof(state.vault, accountId, {
-        kind: 'image', name: file.name, mime: file.type || 'image/jpeg', dataUrl: dataUrl, status: 'attached', at: new Date().toISOString(),
-      });
-      await persist();
-      render();
-      ok.textContent = 'Screenshot saved as your record — it does not count as a re-check. Paste a bank SMS or upload the matching PDF statement.';
-      return;
-    }
-    var text = await Proof.extractPdfText(Proof.dataUrlToBytes(dataUrl));
-    var result = Proof.checkProofMatch('pdf', text, a, profileName);
-    if (result === 'mismatch') {
-      var missing = Proof.missingProofTerms('pdf', text, a, profileName);
-      err.textContent = 'This statement doesn\'t mention ' + missing.join(', ') + ' — check you uploaded the right statement.';
-      return;
-    }
-    VaultModel.attachProof(state.vault, accountId, {
-      kind: 'pdf', name: file.name, mime: 'application/pdf', dataUrl: dataUrl,
-      status: result === 'match' ? 'match' : 'attached', at: new Date().toISOString(),
-    });
-    // Baseline from the bank (Phase 3.5): a PDF with exactly ONE clear
-    // balance sets it now. An image, a PDF with no clear balance, or
-    // several balances sets nothing. (A mismatched statement never reaches
-    // here — it returns above.)
-    var baselineNote = '';
-    if (text) {
-      var found = Proof.extractStatementBalance(text);
-      if (found.status === 'one') {
-        VaultModel.setBaselineFromBank(state.vault, accountId, found.amount, 'statement');
-        baselineNote = ' Balance read from your statement: ' + fmtRs(found.amount) + '.';
-      }
-    }
-    await persist();
-    render();
-    ok.textContent = (result === 'match'
-      ? '✓ Statement matches — this card is checked.'
-      : 'Statement attached — couldn\'t read the text, kept as your record. It does not count as a re-check.') + baselineNote;
-  }
-  function toggleReconcileSkip(accountId) {
-    if (state.reconcileSkipped[accountId]) delete state.reconcileSkipped[accountId];
-    else state.reconcileSkipped[accountId] = true;
-    render();
-  }
-  async function markMonthlyCheckDoneClick() {
-    var err = $('reconcile-error');
-    var ok = $('reconcile-ok');
-    err.textContent = ''; ok.textContent = '';
-    var st = VaultModel.monthlyCheckStatus(state.vault, state.reconcileSkipped);
-    if (!st.ready) { err.textContent = 'Some accounts still need a re-check or a skip first.'; return; }
-    VaultModel.markMonthlyCheckDone(state.vault, st.skippedCount);
-    state.reconcileSkipped = {};
-    await persist();
-    render();
-    ok.textContent = 'Monthly check done' + (st.skippedCount > 0
-      ? ' — ' + st.skippedCount + ' account' + (st.skippedCount === 1 ? '' : 's') + ' skipped.' : ' — all accounts checked.');
-  }
-
-  // ---- Phase 3: one page per job (hash routing) ----
-  function currentRoute() { return Nav.routeForHash(location.hash); }
-  function showPage(name) {
-    if (Nav.PAGES.indexOf(name) < 0) name = 'wallet';
-    state.currentPage = name;
-    document.querySelectorAll('.page').forEach(function (el) {
-      el.classList.toggle('hidden', el.id !== 'page-' + name);
-    });
-    document.querySelectorAll('.nav-btn[data-page]').forEach(function (b) {
-      b.classList.toggle('active', b.getAttribute('data-page') === name);
-    });
-    closeBell();
-    if (name === 'profile') fillProfileForm();
-  }
-  function closeBell() { hide($('notif-panel')); }
-  // Notifications live behind the bell, not on a page. The badge shows the
-  // unread count; opening the bell marks everything read and clears it.
-  function renderBell() {
-    if (!state.vault) return;
-    var unread = VaultModel.unreadNotificationCount(state.vault);
-    var badge = $('bell-badge');
-    badge.textContent = String(unread);
-    badge.classList.toggle('hidden', unread === 0);
-    var list = $('bell-list');
-    list.innerHTML = '';
-    $('bell-empty').classList.toggle('hidden', state.vault.notifications.length > 0);
-    state.vault.notifications.slice().reverse().slice(0, 50).forEach(function (n) {
-      var div = document.createElement('div');
-      div.className = 'notif';
-      div.innerHTML = '<span class="pill ' + (n.kind === 'low-balance' ? 'amber' : 'green') + '">' + esc(n.kind) + '</span> ' +
-        esc(n.text) + ' <span class="muted">(' + esc(String(n.at || '').slice(0, 16).replace('T', ' ')) + ')</span>';
-      list.appendChild(div);
-    });
-  }
-  async function toggleBell() {
-    var panel = $('notif-panel');
-    if (panel.classList.contains('hidden')) {
-      renderBell();
-      show(panel);
-      if (state.vault && VaultModel.markAllNotificationsRead(state.vault) > 0) {
-        await persist();
-        renderBell();
-      }
-    } else {
-      closeBell();
-    }
-  }
-  function renderProfileHeader() {
-    if (!state.vault) return;
-    var p = state.vault.profile || { displayName: '', dp: null };
-    var name = (p.displayName || '').trim() || 'My Vault';
-    var initial = name.charAt(0).toUpperCase() || 'V';
-    $('sidebar-name').textContent = name;
-    $('topbar-name').textContent = name;
-    [['sidebar-dp', 'sidebar-dp-initials'], ['topbar-dp', 'topbar-dp-initials']].forEach(function (pair) {
-      var img = $(pair[0]), ini = $(pair[1]);
-      ini.textContent = initial;
-      if (p.dp) { img.src = p.dp; show(img); hide(ini); }
-      else { hide(img); show(ini); }
-    });
-  }
-  function fillProfileForm() {
-    if (!state.vault) return;
-    var p = state.vault.profile || { displayName: '', phone: '', email: '', dp: null };
-    $('profile-name').value = p.displayName || '';
-    $('profile-phone').value = p.phone || '';
-    $('profile-email').value = p.email || '';
-    state.profileDpDataUrl = null;
-    var prev = $('profile-dp-preview'), ini = $('profile-dp-initials');
-    var name = (p.displayName || '').trim() || 'My Vault';
-    ini.textContent = name.charAt(0).toUpperCase() || 'V';
-    if (p.dp) { prev.src = p.dp; show(prev); hide(ini); }
-    else { hide(prev); show(ini); }
-    $('profile-error').textContent = '';
-    $('profile-ok').textContent = '';
-  }
-  // Shrink a chosen photo to max 256px JPEG (quality steps down until it fits
-  // the 100 KB cap). The pure dimension math lives in model.js (dpTargetSize).
-  function downscaleDp(file) {
-    return new Promise(function (resolve, reject) {
-      var url = URL.createObjectURL(file);
-      var img = new Image();
-      img.onload = function () {
-        URL.revokeObjectURL(url);
-        var t = VaultModel.dpTargetSize(img.naturalWidth, img.naturalHeight);
-        var canvas = document.createElement('canvas');
-        canvas.width = t.width; canvas.height = t.height;
-        var ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, t.width, t.height);
-        var qualities = [0.8, 0.6, 0.4];
-        for (var i = 0; i < qualities.length; i++) {
-          var dataUrl = canvas.toDataURL('image/jpeg', qualities[i]);
-          if (VaultModel.dpByteLength(dataUrl) <= VaultModel.MAX_DP_BYTES) { resolve(dataUrl); return; }
-        }
-        reject(new Error('That photo is too large even after shrinking — try a smaller one.'));
-      };
-      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('That file is not a photo I can read.')); };
-      img.src = url;
-    });
-  }
-  async function onProfileDpFile() {
-    var file = $('profile-dp-input').files && $('profile-dp-input').files[0];
-    var err = $('profile-error');
-    err.textContent = '';
-    if (!file) return;
-    if (!file.type || file.type.indexOf('image/') !== 0) { err.textContent = 'Pick an image file.'; return; }
-    try {
-      state.profileDpDataUrl = await downscaleDp(file);
-      var prev = $('profile-dp-preview'), ini = $('profile-dp-initials');
-      prev.src = state.profileDpDataUrl;
-      show(prev); hide(ini);
-      $('profile-ok').textContent = 'Photo ready — tap Save profile to keep it.';
-    } catch (e) {
-      err.textContent = e.message;
-      state.profileDpDataUrl = null;
-    }
-  }
-  async function saveProfile() {
-    var err = $('profile-error'), ok = $('profile-ok');
-    err.textContent = ''; ok.textContent = '';
-    var input = {
-      displayName: $('profile-name').value,
-      phone: $('profile-phone').value,
-      email: $('profile-email').value,
-    };
-    if (state.profileDpDataUrl) input.dp = state.profileDpDataUrl;
-    try {
-      VaultModel.setProfile(state.vault, input);
-      state.profileDpDataUrl = null;
-      await persist();
-      render();
-      ok.textContent = 'Profile saved.';
-    } catch (e) {
-      err.textContent = (e.errors && e.errors.length) ? e.errors.join(' ') : e.message;
-    }
-  }
-
-  // Enter the vault after the PIN (and, when on, the 2FA code) has passed.
-  function enterVault(doneLabel) {
-    state.lastActive = Date.now();
-    setLockPill(false);
-    showScreen('vault');
-    showPage(currentRoute());
-    render();
-    showSecuring(state.vault.accounts[0] || null, doneLabel || 'Vault unlocked — welcome back.');
-  }
-
-  // ---- Step 1: setup / unlock ----
-  async function setup() {
+  // ---- setup (first run: fresh v2 vault, no migration) ----
+  async function onSetup() {
     var pin = $('setup-pin').value.trim();
     var pin2 = $('setup-pin2').value.trim();
-    var pass = $('setup-pass').value;
-    var err = $('setup-error');
-    err.textContent = '';
-    if (!VaultCrypto.validPin(pin)) { err.textContent = 'PIN must be exactly 6 digits.'; return; }
-    if (pin !== pin2) { err.textContent = 'The two PINs do not match.'; return; }
-    if (!VaultCrypto.validPassphrase(pass)) { err.textContent = 'Passphrase must be empty or at least 4 characters.'; return; }
-    $('setup-btn').disabled = true;
+    var pass = $('setup-pass').value || '';
+    setText('setup-error', '');
+    if (!VaultCrypto.validPin(pin)) { setText('setup-error', 'PIN must be exactly 6 digits.'); return; }
+    if (pin !== pin2) { setText('setup-error', 'The two PINs do not match.'); return; }
+    if (!VaultCrypto.validPassphrase(pass)) { setText('setup-error', 'Passphrase must be empty or at least 4 characters.'); return; }
     try {
-      var made = await VaultCrypto.createVault(pin, pass, emptyVault());
-      saveEnvelope(made.envelope);
+      var fresh = GharModel.emptyVault();
+      var made = await VaultCrypto.createVault(pin, pass, fresh);
+      state.envelope = made.envelope;
       state.key = made.key;
-      state.vault = emptyVault();
-      state.passphrase = pass;
+      state.vault = fresh;
+      saveEnvelope();
       state.lockout = VaultCrypto.recordSuccess();
       saveLockout();
-      enterVault('Vault created — you\'re all set.');
+      state.lastActiveMs = Date.now();
+      setVal('setup-pin', '');
+      setVal('setup-pin2', '');
+      setVal('setup-pass', '');
+      window.location.hash = '#/home';
+      showScreen('vault');
+      renderAll();
+      route();
     } catch (e) {
-      err.textContent = 'Could not create the vault: ' + e.message;
-    } finally {
-      $('setup-btn').disabled = false;
+      setText('setup-error', 'Could not create the book — try again.');
     }
   }
 
-  async function unlock() {
+  // ---- unlock ----
+  async function onUnlock() {
     var pin = $('unlock-pin').value.trim();
-    var pass = $('unlock-pass').value;
-    var err = $('unlock-error');
-    err.textContent = '';
-    refreshLockoutNote();
-    if (VaultCrypto.isLocked(state.lockout, Date.now())) return;
-    if (!VaultCrypto.validPin(pin)) { err.textContent = 'PIN must be exactly 6 digits.'; return; }
-    $('unlock-btn').disabled = true;
+    var pass = $('unlock-pass').value || '';
+    setText('unlock-error', '');
+    if (VaultCrypto.isLocked(state.lockout, Date.now())) { updateLockoutNote(); return; }
+    if (!VaultCrypto.validPin(pin)) { setText('unlock-error', 'PIN must be exactly 6 digits.'); return; }
     try {
-      var out = await VaultCrypto.unlockVault(pin, pass, state.envelope);
-      // Phase 1/2 vaults have no profile key — migrate so they load fine.
-      out.vault = VaultModel.migrateVault(out.vault);
-      state.lockout = VaultCrypto.recordSuccess();
-      saveLockout();
-      // Second factor: if 2FA is on, the PIN alone only unlocks the vault
-      // into a pending slot — the vault screen stays hidden until the
-      // authenticator (or backup) code passes.
-      if (out.vault.settings && out.vault.settings.twoFactor && out.vault.settings.twoFactor.enabled) {
-        state.pending2fa = { key: out.key, vault: out.vault, passphrase: pass };
-        state.key = null; state.vault = null; state.passphrase = '';
-        $('totp-code').value = ''; $('totp-error').textContent = '';
-        showScreen('totp');
-        $('totp-code').focus();
+      var res = await VaultCrypto.unlockVault(pin, pass, state.envelope);
+      if (!GharModel.isGharVault(res.vault)) {
+        setText('unlock-error', 'This book is from the old Card Vault. It does not open here — an old backup restores only into the old code.');
         return;
       }
-      state.key = out.key;
-      state.vault = out.vault;
-      state.passphrase = pass;
-      enterVault();
-    } catch (e) {
-      state.lockout = VaultCrypto.recordFailure(state.lockout, Date.now());
+      state.key = res.key;
+      state.vault = res.vault;
+      state.lockout = VaultCrypto.recordSuccess();
       saveLockout();
-      err.textContent = e.code === 'DECRYPT_FAILED'
-        ? 'Wrong PIN or passphrase — the vault could not be opened.'
-        : 'The vault could not be opened: ' + e.message;
-      refreshLockoutNote();
-    } finally {
-      $('unlock-btn').disabled = false;
-    }
-  }
-
-  // ---- Two-factor: verify the authenticator (or backup) code ----
-  async function totpSubmit() {
-    var err = $('totp-error');
-    var pending = state.pending2fa;
-    if (!pending) { err.textContent = 'Start again with your PIN.'; showScreen('unlock'); return; }
-    var code = $('totp-code').value.trim();
-    var secret = pending.vault.settings.twoFactor.secret;
-    var ok = await Totp.verifyTotp(secret, code);
-    if (!ok) {
-      // A backup code works in place of the authenticator code (PIN still
-      // required — it already passed). A used code is burned.
-      var checked = await Totp.checkBackupCode(code, loadBackupHashes());
-      if (checked.ok) {
-        saveBackupHashes(checked.remaining);
-        ok = true;
-      }
-    }
-    if (!ok) {
+      state.lastActiveMs = Date.now();
+      setVal('unlock-pin', '');
+      setVal('unlock-pass', '');
+      showScreen('vault');
+      renderAll();
+      route();
+    } catch (e) {
       state.lockout = VaultCrypto.recordFailure(state.lockout, Date.now());
       saveLockout();
       if (VaultCrypto.isLocked(state.lockout, Date.now())) {
-        state.pending2fa = null;
-        err.textContent = 'Too many wrong codes. ' + lockoutMessage();
-        showScreen('unlock');
-        refreshLockoutNote();
+        updateLockoutNote();
+        setText('unlock-error', 'Wrong PIN. The book is now locked for a while.');
       } else {
-        err.textContent = 'That code doesn\'t match. Check your authenticator app and try again.';
+        setText('unlock-error', 'Wrong PIN — try again. (' + state.lockout.failures
+          + (state.lockout.failures === 1 ? ' wrong try' : ' wrong tries') + ')');
       }
-      return;
     }
-    state.key = pending.key;
-    state.vault = pending.vault;
-    state.passphrase = pending.passphrase;
-    state.pending2fa = null;
-    state.lockout = VaultCrypto.recordSuccess();
-    saveLockout();
-    enterVault();
   }
 
-  // ---- Security settings ----
-  function refreshSecuritySettings() {
-    if (!state.vault) return;
-    var tf = state.vault.settings.twoFactor;
-    var on = !!(tf && tf.enabled);
-    $('2fa-status').textContent = on
-      ? 'On — unlocking also needs a code from your authenticator app.'
-      : 'Off — your vault opens with the PIN only.';
-    $('2fa-toggle-btn').textContent = on ? 'Disable two-factor' : 'Enable two-factor';
-    hide($('2fa-setup')); hide($('2fa-disable'));
-    var mins = state.vault.settings.autoLockMinutes || 5;
-    $('autolock-select').value = String(mins);
-    $('settings-hide-btn').textContent = state.hideBalances ? 'Show balances' : 'Hide balances';
-    $('settings-hide-btn').classList.toggle('on', state.hideBalances);
-    var n = loadBackupHashes().length;
-    $('backup-count').textContent = n
-      ? n + ' backup code' + (n === 1 ? '' : 's') + ' remaining.'
-      : 'No backup codes are stored.';
-  }
-  async function verifyPinForSettings(pin) {
-    // Prove the PIN by decrypting the envelope with it (same check as unlock).
-    await VaultCrypto.unlockVault(pin, state.passphrase, state.envelope);
-    return true;
-  }
-  function start2faSetup() {
-    var secret = Totp.generateSecret();
-    state.twoFaSetup = secret;
-    $('2fa-secret-text').textContent = secret;
-    $('2fa-otpauth-link').href = Totp.otpauthUrl(secret);
-    $('2fa-confirm-code').value = '';
-    $('2fa-error').textContent = '';
-    hide($('2fa-backup-box'));
-    show($('2fa-secret-box'));
-    show($('2fa-confirm-form'));
-    show($('2fa-setup'));
-    hide($('2fa-disable'));
-  }
-  async function confirm2faSetup() {
-    var err = $('2fa-error');
-    var code = $('2fa-confirm-code').value.trim();
-    if (!state.twoFaSetup) { err.textContent = 'Tap "Enable two-factor" again to get a fresh key.'; return; }
-    if (!(await Totp.verifyTotp(state.twoFaSetup, code))) {
-      err.textContent = 'That code doesn\'t match — check your authenticator app and try again.';
-      return;
-    }
-    VaultModel.enableTwoFactor(state.vault, state.twoFaSetup);
-    var codes = await Totp.generateBackupCodes(10);
-    saveBackupHashes(codes.hashes);
-    await persist();
-    state.twoFaSetup = null;
-    $('2fa-backup-codes').innerHTML = codes.codes.map(function (c) { return '<div>' + esc(c) + '</div>'; }).join('');
-    err.textContent = '';
-    refreshSecuritySettings();
-    // refreshSecuritySettings() hides the setup panel; re-open it showing
-    // only the backup codes (the secret + confirm form are done).
-    show($('2fa-setup'));
-    hide($('2fa-secret-box'));
-    hide($('2fa-confirm-form'));
-    show($('2fa-backup-box'));
-  }
-  async function disable2fa() {
-    var err = $('2fa-disable-error');
-    var pin = $('2fa-off-pin').value;
-    var code = $('2fa-off-code').value.trim();
-    try { await verifyPinForSettings(pin); }
-    catch (_e) { err.textContent = 'Wrong PIN.'; return; }
-    var secret = state.vault.settings.twoFactor && state.vault.settings.twoFactor.secret;
-    if (!(await Totp.canDisableTwoFactor(secret, code))) {
-      err.textContent = 'That code doesn\'t match — enter the current code from your authenticator app.';
-      return;
-    }
-    VaultModel.disableTwoFactor(state.vault);
-    saveBackupHashes([]);
-    await persist();
-    $('2fa-off-pin').value = ''; $('2fa-off-code').value = '';
-    err.textContent = '';
-    refreshSecuritySettings();
-  }
-  async function changePin() {
-    var err = $('change-pin-error');
-    var ok = $('change-pin-ok');
-    err.textContent = ''; ok.textContent = '';
-    var oldPin = $('change-pin-old').value;
-    var newPin = $('change-pin-new').value;
-    var newPin2 = $('change-pin-new2').value;
-    if (!VaultCrypto.validPin(newPin)) { err.textContent = 'The new PIN must be exactly 6 digits.'; return; }
-    if (newPin !== newPin2) { err.textContent = 'The new PINs don\'t match.'; return; }
-    try { await verifyPinForSettings(oldPin); }
-    catch (_e) { err.textContent = 'Wrong current PIN.'; return; }
-    var made = await VaultCrypto.createVault(newPin, state.passphrase, state.vault);
-    saveEnvelope(made.envelope);
-    state.key = made.key;
-    $('change-pin-old').value = ''; $('change-pin-new').value = ''; $('change-pin-new2').value = '';
-    ok.textContent = 'PIN changed. Use the new PIN next time.';
-  }
-  async function changePassphrase() {
-    var err = $('change-pass-error');
-    var ok = $('change-pass-ok');
-    err.textContent = ''; ok.textContent = '';
-    var pin = $('change-pass-old').value;
-    var newPass = $('change-pass-new').value;
-    if (!VaultCrypto.validPassphrase(newPass)) { err.textContent = 'The passphrase must be empty or at least 4 characters.'; return; }
-    try { await verifyPinForSettings(pin); }
-    catch (_e) { err.textContent = 'Wrong PIN.'; return; }
-    var made = await VaultCrypto.createVault(pin, newPass, state.vault);
-    saveEnvelope(made.envelope);
-    state.key = made.key;
-    state.passphrase = newPass;
-    $('change-pass-old').value = ''; $('change-pass-new').value = '';
-    ok.textContent = newPass ? 'Passphrase changed.' : 'Passphrase removed.';
-  }
-  async function regenerateBackupCodes() {
-    var err = $('show-codes-error');
-    err.textContent = '';
-    var pin = $('show-codes-pin').value;
-    try { await verifyPinForSettings(pin); }
-    catch (_e) { err.textContent = 'Wrong PIN.'; return; }
-    var codes = await Totp.generateBackupCodes(10);
-    saveBackupHashes(codes.hashes);
-    $('show-codes-list').innerHTML = codes.codes.map(function (c) { return '<div>' + esc(c) + '</div>'; }).join('');
-    show($('show-codes-box'));
-    $('show-codes-pin').value = '';
-    refreshSecuritySettings();
-  }
-
-  // ---- Step 2: manual add-account ----
-  function populateProviders() {
-    var sel = $('add-provider');
-    sel.innerHTML = '';
-    VaultModel.PROVIDERS.forEach(function (p) {
-      var o = document.createElement('option');
-      o.value = p; o.textContent = p;
-      sel.appendChild(o);
+  // ---- routing (no page is reachable while locked) ----
+  function route() {
+    if (!state.key) { showScreen(state.envelope ? 'unlock' : 'setup'); return; }
+    showScreen('vault');
+    var page = Nav.routeForHash(window.location.hash || '#/home');
+    state.currentPage = page;
+    Nav.PAGES.forEach(function (p) {
+      show($('page-' + p), p === page);
+      var btn = $('nav-' + p);
+      if (btn) btn.classList.toggle('active', p === page);
     });
+    renderPage(page);
+    markActive();
   }
 
-  async function addAccount() {
-    var err = $('add-account-error');
-    var ok = $('add-account-ok');
-    err.textContent = ''; ok.textContent = '';
-    var input = {
-      provider: $('add-provider').value,
-      type: $('add-type').value,
-      nickname: $('add-nick').value,
-      last4: $('add-last4').value.trim(),
-      // No balance here (Phase 3.5): a balance is never typed — it is set
-      // only by the bank, from a statement, a total-amount screenshot
-      // (below) or a bank SMS. A verified screenshot is the card's proof
-      // and outranks a statement in the single proof slot.
-      proof: state.addScreenshot || state.addProof || null,
-    };
-    try {
-      var created = VaultModel.createAccount(state.vault, input);
-      // Baseline from the bank (Phase 3.5/3.6): a statement or a
-      // total-amount screenshot uploaded with the card may already carry
-      // one clear balance — set it from the bank's own document, never
-      // from the user's hand. A screenshot amount is the total now, so it
-      // wins over a statement balance.
-      var baselineNote = '';
-      if (state.addProofBalance) {
-        VaultModel.setBaselineFromBank(state.vault, created.id, state.addProofBalance.amount, state.addProofBalance.source || 'statement');
-        baselineNote = ' Balance read from your ' + (state.addProofBalance.source === 'screenshot' ? 'screenshot' : 'statement') + ': ' + fmtRs(state.addProofBalance.amount) + '.';
-      }
-      // Verification (Phase 3.6, Hashir's rule): ONLY a total-amount
-      // screenshot read by on-device OCR verifies a card here. An SMS
-      // never calls the verification marker — see the Intelligence
-      // section, which has no call to it anywhere.
-      if (state.addScreenshot) {
-        VaultModel.markAccountBankConfirmed(state.vault, created.id);
-        baselineNote += ' Card verified by your screenshot.';
-      }
-      await persist();
-      render();
-      ok.textContent = 'Account added: ' + input.nickname + ' (•••• ' + input.last4 + ').' + baselineNote;
-      $('add-nick').value = ''; $('add-last4').value = '';
-      resetAddProof();
-      showSecuring(created, 'Saved securely!');
-    } catch (e) {
-      err.textContent = (e.errors && e.errors.length ? e.errors.join(' ') : e.message);
-    }
+  // ---- rendering ----
+  function renderList(listId, emptyId, rows) {
+    show($(emptyId), rows.length === 0);
+    $(listId).innerHTML = rows.join('');
   }
-
-  // ---- Phase 3.3: statement proof on the Add Card page (optional) ----
-  // The proof is the user's own record, checked only against what they
-  // typed (provider + last-4 + profile name). A matching statement PDF
-  // verifies the card (rung 2 of the ladder); an SMS never does. A plain
-  // photo uploaded here is NOT read by the app — the total-amount
-  // screenshot check lives in its own input (onScreenshotFile, below).
-  function resetAddProof() {
-    state.addProof = null;
-    state.addProofBalance = null;
-    state.addScreenshot = null;
-    $('add-proof').value = '';
-    $('add-proof-status').textContent = '';
-    $('add-proof-error').textContent = '';
-    hide($('add-proof-preview'));
-    $('add-shot').value = '';
-    $('add-shot-status').textContent = '';
-    $('add-shot-error').textContent = '';
-  }
-  function readFileAsDataUrl(file) {
-    return new Promise(function (resolve, reject) {
-      var r = new FileReader();
-      r.onload = function () { resolve(r.result); };
-      r.onerror = function () { reject(new Error('Could not read that file.')); };
-      r.readAsDataURL(file);
+  function renderToday() {
+    var items = GharModel.todayItems(state.vault);
+    show($('today-empty'), items.length === 0);
+    var html = '';
+    items.forEach(function (it) {
+      html += '<div class="sum-row"><div class="nm">' + esc(it.title)
+        + '<span class="sub">' + esc(it.detail) + '</span></div>'
+        + '<span class="pill' + (it.overdue ? ' amber' : '') + '">' + esc(GharModel.dueLabel(it)) + '</span>'
+        + '<a class="pill" href="' + esc(it.link) + '">Open</a></div>';
     });
+    $('today-list').innerHTML = html;
   }
-  async function onProofFile() {
-    var err = $('add-proof-error');
-    var status = $('add-proof-status');
-    err.textContent = ''; status.textContent = ''; hide($('add-proof-preview'));
-    state.addProof = null;
-    state.addProofBalance = null;
-    var file = $('add-proof').files[0];
-    if (!file) return;
-    var dataUrl;
-    try { dataUrl = await readFileAsDataUrl(file); }
-    catch (e) { err.textContent = e.message; return; }
-    var checked = Proof.validateProofData(dataUrl, file.size);
-    if (!checked.ok) { err.textContent = checked.errors.join(' '); return; }
-    var provider = $('add-provider').value;
-    var last4 = $('add-last4').value.trim();
-    var profileName = (state.vault && state.vault.profile && state.vault.profile.displayName) || '';
-    if (!last4) {
-      status.textContent = 'Type the last 4 digits first — the statement is checked against them.';
-      return;
+  function renderStaff() {
+    var month = monthInputVal('staff-month');
+    var staff = state.vault.staff || [];
+    // Advance form: pick the helper from a dropdown (static ids, so the
+    // fake-DOM tests can drive it exactly like the other forms).
+    var advSel = $('adv-helper');
+    if (advSel) {
+      advSel.innerHTML = staff.map(function (s) {
+        return '<option value="' + esc(s.id) + '">' + esc(s.name) + ' — ' + esc(s.role) + '</option>';
+      }).join('');
     }
-    var record = {
-      kind: checked.kind, name: file.name,
-      mime: checked.kind === 'pdf' ? 'application/pdf' : (file.type || 'image/jpeg'),
-      dataUrl: dataUrl, status: 'attached', at: new Date().toISOString(),
-    };
-    if (checked.kind === 'image') {
-      // This photo is not read by the app: show it next to the typed data
-      // and let the user confirm by eye. Never an automatic match for an
-      // image here — the OCR read lives in the total-amount screenshot
-      // input (onScreenshotFile), not in this statement box.
-      state.addProof = record;
-      $('add-proof-img').src = dataUrl;
-      $('add-proof-typed').textContent = 'Provider: ' + provider + ' · Last 4: ' + last4
-        + ' · Name: ' + (profileName || 'not set — set it on the Profile page to check it too');
-      status.textContent = 'Photo attached — this photo isn\'t read by the app, so check it yourself below. (To verify with a screenshot, use the total-amount screenshot box.)';
-      show($('add-proof-preview'));
-      return;
-    }
-    var text = await Proof.extractPdfText(Proof.dataUrlToBytes(dataUrl));
-    var result = Proof.checkProofMatch('pdf', text, { provider: provider, last4: last4 }, profileName);
-    if (result === 'match') {
-      record.status = 'match';
-      status.textContent = '✓ Statement matches — the PDF mentions ' + provider + ', ••••' + last4
-        + (profileName ? ' and ' + profileName : '') + '.';
-    } else if (result === 'mismatch') {
-      var missing = Proof.missingProofTerms('pdf', text, { provider: provider, last4: last4 }, profileName);
-      record.status = 'mismatch';
-      status.textContent = 'This statement doesn\'t mention ' + missing.join(', ')
-        + ' — check you uploaded the right statement. It is kept only as "doesn\'t match".';
-    } else {
-      status.textContent = 'Statement attached — couldn\'t read the text, kept as your record.';
-    }
-    // Balance from the bank (Phase 3.5): a PDF with exactly ONE clear
-    // balance sets the baseline when the card is added. No clear balance,
-    // or several different ones, sets nothing — the user is told so
-    // plainly and can paste a bank SMS instead. Never guessed.
-    if (text) {
-      var found = Proof.extractStatementBalance(text);
-      if (found.status === 'one') {
-        state.addProofBalance = { amount: found.amount, label: found.label, match: found.match, source: 'statement' };
-        status.textContent += ' Balance read from your statement: ' + fmtRs(found.amount) + '.';
-      } else if (found.status === 'ambiguous') {
-        status.textContent += ' The statement has several different balances — no balance was set. Paste a bank SMS instead.';
+    var rows = staff.map(function (s) {
+      var paid = GharModel.findPaidStaffMonth(s, month);
+      var locked = !!paid;
+      var working = null;
+      if (locked) working = paid.working;
+      else {
+        try { working = GharModel.computeMonthPay(state.vault, s.id, month); }
+        catch (_e) { working = null; }
+      }
+      var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(s.name) + ' — ' + esc(s.role)
+        + '<span class="sub">' + esc(GharModel.fmtRs(s.salaryPkr)) + ' monthly salary · joined ' + esc(s.joinedDate)
+        + ' · paid leave ' + esc(String(s.leavePerMonth)) + ' days/month'
+        + (s.phone ? ' · ' + esc(s.phone) : '') + ' · as you entered it</span></div></div>';
+      // Attendance: one tap per day cycles present -> absent -> half ->
+      // present. Present is the default, so only exceptions are stored.
+      var dim = GharModel.daysInMonth(month);
+      var counts = GharModel.attendanceCounts(s, month);
+      html += '<h3>Attendance — ' + esc(month) + '</h3>'
+        + '<p class="muted">Tap a day to mark it: present (P) → absent (A) → half day (H). '
+        + 'Absent: ' + counts.absentDays + ' · Half: ' + counts.halfDays + ' · the rest count as present.</p><div class="row">';
+      for (var d = 1; d <= dim; d++) {
+        var dateStr = month + '-' + String(d).padStart(2, '0');
+        var mark = (s.attendance && s.attendance[dateStr]) || 'present';
+        var letter = mark === 'absent' ? 'A' : mark === 'half' ? 'H' : 'P';
+        html += '<button type="button" class="small" style="flex:0 0 auto;min-width:44px;min-height:44px"'
+          + ' data-action="att" data-helper="' + esc(s.id) + '" data-date="' + esc(dateStr) + '"'
+          + (locked ? ' disabled' : '') + '>' + d + ' · ' + letter + '</button>';
+      }
+      html += '</div>';
+      // Advances: each advance with what is still left to recover.
+      html += '<h3>Advances</h3>';
+      var remaining = GharModel.staffRemainingAdvance(s);
+      if (!s.advances || s.advances.length === 0) {
+        html += '<p class="muted">No advances — remaining advance: Rs 0.</p>';
       } else {
-        status.textContent += ' No clear balance found in this statement — paste a bank SMS instead.';
+        html += '<p class="muted">Remaining advance: ' + esc(GharModel.fmtRs(remaining)) + '.</p>';
+        s.advances.forEach(function (a) {
+          html += '<div class="sum-row"><div class="nm">' + esc(GharModel.fmtRs(a.amount))
+            + ' on ' + esc(a.date)
+            + '<span class="sub">' + (a.note ? esc(a.note) + ' · ' : '')
+            + (a.recovery === 'instalments'
+              ? 'instalments of ' + esc(GharModel.fmtRs(a.instalmentPkr)) + ' a month'
+              : 'full recovery from the next pay')
+            + ' · recovered ' + esc(GharModel.fmtRs(a.recoveredPkr))
+            + ' · remaining ' + esc(GharModel.fmtRs(GharModel.advanceRemaining(a)))
+            + ' · as you entered it</span></div></div>';
+        });
       }
-    }
-    if (!profileName) status.textContent += ' Set your name on the Profile page to check it against the statement too.';
-    if (state.addScreenshot) status.textContent += ' A verified screenshot is already attached — it stays the card\'s proof.';
-    state.addProof = record;
-  }
-  function onProofSelfCheck() {
-    // A deliberate tap by the user, never automatic: they checked the
-    // screenshot against the typed data with their own eyes.
-    if (!state.addProof || state.addProof.kind !== 'image') return;
-    state.addProof.status = 'self-checked';
-    $('add-proof-status').textContent = '✓ You checked this screenshot yourself — saved as "self-checked".';
-    hide($('add-proof-preview'));
-  }
-
-  // ---- Phase 3.6: total-amount screenshot verification on the Add page ----
-  // The screenshot is read ON THIS DEVICE by the vendored OCR engine —
-  // the image never leaves the phone or PC. Exactly ONE clear total
-  // amount verifies the card (and sets the baseline balance); anything
-  // else sets nothing and says so plainly. This is the ONLY path that
-  // marks a card verified (in addAccount, above) — an SMS never
-  // verifies a card.
-  async function onScreenshotFile() {
-    var err = $('add-shot-error');
-    var status = $('add-shot-status');
-    err.textContent = ''; status.textContent = '';
-    state.addScreenshot = null;
-    var file = $('add-shot').files[0];
-    if (!file) return;
-    var last4 = $('add-last4').value.trim();
-    if (!last4) {
-      status.textContent = 'Type the last 4 digits first — the screenshot is checked against them.';
-      return;
-    }
-    var dataUrl;
-    try { dataUrl = await readFileAsDataUrl(file); }
-    catch (e) { err.textContent = e.message; return; }
-    var checked = Ocr.validateScreenshotFile(dataUrl, file.size);
-    if (!checked.ok) { err.textContent = checked.errors.join(' '); return; }
-    status.textContent = 'Reading your screenshot on this device — the image never leaves your phone or PC…';
-    var text;
-    try { text = await Ocr.recognizeImage(file); }
-    catch (e) {
-      err.textContent = 'Couldn\'t read this screenshot — try a clearer photo, or upload your statement PDF instead.';
-      status.textContent = '';
-      return;
-    }
-    var found = Ocr.extractScreenshotAmount(text);
-    if (found.status === 'one') {
-      state.addScreenshot = {
-        kind: 'image', name: file.name, mime: file.type || 'image/jpeg',
-        dataUrl: dataUrl, status: 'screenshot-verified', at: new Date().toISOString(),
-      };
-      // The screenshot amount is the total now, so it wins over a
-      // statement balance for the baseline.
-      state.addProofBalance = { amount: found.amount, label: found.label, match: found.match, source: 'screenshot' };
-      status.textContent = '✓ Screenshot verified — total amount ' + fmtRs(found.amount) + ' read from your screenshot (' + found.label + ').';
-      if (state.addProof) status.textContent += ' This screenshot replaces the statement as the card\'s proof.';
-    } else if (found.status === 'ambiguous') {
-      status.textContent = 'This screenshot has several different amounts (' + found.amounts.map(fmtRs).join(', ') + ') — no balance was set. Upload your statement PDF instead.';
-    } else {
-      status.textContent = 'Couldn\'t read a clear total amount from this screenshot — upload your statement PDF instead.';
-    }
-  }
-
-  // Remove a statement proof from a saved card (two-tap, like delete).
-  function requestProofRemove(accountId) { state.pendingProofRemoveId = accountId; render(); }
-  async function confirmProofRemove(accountId) {
-    if (state.pendingProofRemoveId !== accountId) return;
-    VaultModel.removeProof(state.vault, accountId);
-    state.pendingProofRemoveId = null;
-    await persist();
-    render();
-  }
-  function cancelProofRemove() { state.pendingProofRemoveId = null; render(); }
-
-  // ---- Phase 3.2: edit / reorder / delete a card ----
-  // Per-card action buttons. Delete is two-tap: the first tap only arms
-  // (pendingDeleteId), the confirm row says plainly that the card's
-  // transactions go too, and only the second tap deletes. One tap can
-  // never delete a card.
-  function cardActionsHtml(a, i, n) {
-    if (state.pendingDeleteId === a.id) {
-      return '<div class="card-actions"><span class="confirm-note">Remove this card? This also removes its transactions.</span>'
-        + '<button data-action="confirm-remove" data-id="' + esc(a.id) + '" class="danger">Yes, remove</button>'
-        + '<button data-action="cancel-remove" data-id="' + esc(a.id) + '" class="secondary">Cancel</button></div>';
-    }
-    return '<div class="card-actions">'
-      + '<button data-action="edit" data-id="' + esc(a.id) + '">Edit</button>'
-      + '<button data-action="move-up" data-id="' + esc(a.id) + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>'
-      + '<button data-action="move-down" data-id="' + esc(a.id) + '"' + (i === n - 1 ? ' disabled' : '') + '>↓</button>'
-      + '<button data-action="remove" data-id="' + esc(a.id) + '" class="danger">Remove</button>'
-      + proofActionsHtml(a) + '</div>';
-  }
-  // Statement proof on a saved card (Phase 3.3): a link to view the stored
-  // file, and a two-tap remove (like delete — never one tap).
-  function proofActionsHtml(a) {
-    if (!a.proof) return '';
-    if (state.pendingProofRemoveId === a.id) {
-      return '<span class="confirm-note">Remove this proof?</span>'
-        + '<button data-action="confirm-remove-proof" data-id="' + esc(a.id) + '" class="danger">Yes, remove proof</button>'
-        + '<button data-action="cancel-remove-proof" data-id="' + esc(a.id) + '" class="secondary">Cancel</button>';
-    }
-    return '<a class="proof-link" href="' + esc(a.proof.dataUrl) + '" target="_blank" download="' + esc(a.proof.name || 'statement') + '">View proof</a>'
-      + '<button data-action="remove-proof" data-id="' + esc(a.id) + '">Remove proof</button>';
-  }
-  function sumActionsHtml(a, i, n) {
-    if (state.pendingDeleteId === a.id) {
-      return '<span class="sum-actions"><button data-action="confirm-remove" data-id="' + esc(a.id) + '" class="danger">Yes, remove</button>'
-        + '<button data-action="cancel-remove" data-id="' + esc(a.id) + '" class="secondary">Cancel</button></span>';
-    }
-    return '<span class="sum-actions">'
-      + '<button data-action="edit" data-id="' + esc(a.id) + '">Edit</button>'
-      + '<button data-action="move-up" data-id="' + esc(a.id) + '"' + (i === 0 ? ' disabled' : '') + '>↑</button>'
-      + '<button data-action="move-down" data-id="' + esc(a.id) + '"' + (i === n - 1 ? ' disabled' : '') + '>↓</button>'
-      + '<button data-action="remove" data-id="' + esc(a.id) + '" class="danger">Remove</button></span>';
-  }
-  function openEdit(accountId) {
-    var a = VaultModel.findAccount(state.vault, accountId);
-    if (!a) return;
-    state.editingAccountId = accountId;
-    state.pendingDeleteId = null;
-    $('edit-provider').value = a.provider;
-    $('edit-last4').value = a.last4;
-    $('edit-nick').value = a.nickname;
-    $('edit-account-error').textContent = '';
-    $('edit-account-ok').textContent = '';
-    show($('edit-account-card'));
-    $('edit-account-card').scrollIntoView({ block: 'nearest' });
-  }
-  async function saveEdit() {
-    var err = $('edit-account-error');
-    err.textContent = '';
-    var id = state.editingAccountId;
-    if (!id) return;
-    try {
-      // Rename only (Hashir's rule): a hand may change the nickname — never
-      // the balance or the type. Those change only when the bank says so.
-      var updated = VaultModel.renameAccount(state.vault, id, $('edit-nick').value);
-      await persist();
-      state.editingAccountId = null;
-      render();
-      showSecuring(updated, 'Saved!');
-    } catch (e) {
-      err.textContent = (e.errors && e.errors.length ? e.errors.join(' ') : e.message);
-    }
-  }
-  function cancelEdit() {
-    state.editingAccountId = null;
-    render();
-  }
-  async function moveCard(accountId, direction) {
-    if (!state.vault) return;
-    try {
-      if (VaultModel.moveAccount(state.vault, accountId, direction)) { await persist(); render(); }
-    } catch (e) { /* unknown id — nothing to move */ }
-  }
-  function requestDelete(accountId) {
-    state.pendingDeleteId = accountId;
-    state.editingAccountId = null;
-    render();
-  }
-  async function confirmDelete(accountId) {
-    if (state.pendingDeleteId !== accountId) return;
-    VaultModel.deleteAccount(state.vault, accountId);
-    state.pendingDeleteId = null;
-    if (state.editingAccountId === accountId) state.editingAccountId = null;
-    if (state.selectedAccountId === accountId) state.selectedAccountId = null;
-    await persist();
-    render();
-  }
-  function cancelDelete() {
-    state.pendingDeleteId = null;
-    render();
-  }
-
-  function accountOptions(sel, preselectId) {
-    sel.innerHTML = '';
-    state.vault.accounts.forEach(function (a) {
-      var o = document.createElement('option');
-      o.value = a.id;
-      // Unknown balance (Phase 3.5): say so — never "Rs 0" for a number
-      // the bank never stated.
-      var balText = (a.balance === null || a.balance === undefined) ? 'balance not set yet' : fmtRs(a.balance);
-      o.textContent = a.nickname + ' — ' + a.provider + ' •••• ' + a.last4 + ' (' + balText + ')';
-      if (a.id === preselectId) o.selected = true;
-      sel.appendChild(o);
+      // Month-end pay: the full working, line by line.
+      html += '<h3>Pay — ' + esc(month) + '</h3>';
+      if (working) {
+        var absentRate = Math.round(Number(s.salaryPkr || 0) / 30);
+        var halfRate = Math.round(Number(s.salaryPkr || 0) / 60);
+        html += '<div class="sum-row"><div class="nm">Monthly salary<span class="sub">as you entered it</span></div>'
+          + '<span class="amt">' + esc(GharModel.fmtRs(working.salaryPkr)) + '</span></div>'
+          + '<div class="sum-row"><div class="nm">Absent: ' + working.absentDays + ' × ' + esc(GharModel.fmtRs(absentRate))
+          + '<span class="sub">' + working.absentDays + ' days × (salary ÷ 30)</span></div>'
+          + '<span class="amt">− ' + esc(GharModel.fmtRs(working.absentDeduction)) + '</span></div>'
+          + '<div class="sum-row"><div class="nm">Half days: ' + working.halfDays + ' × ' + esc(GharModel.fmtRs(halfRate))
+          + '<span class="sub">' + working.halfDays + ' days × (salary ÷ 60)</span></div>'
+          + '<span class="amt">− ' + esc(GharModel.fmtRs(working.halfDeduction)) + '</span></div>'
+          + '<div class="sum-row"><div class="nm">Advance recovery<span class="sub">from the advances above, as you entered them</span></div>'
+          + '<span class="amt">− ' + esc(GharModel.fmtRs(working.advanceRecovery)) + '</span></div>'
+          + '<div class="sum-total"><span>Net payable</span><span>' + esc(GharModel.fmtRs(working.netPkr)) + '</span></div>'
+          + '<p class="muted">' + esc(GharModel.fmtRs(working.salaryPkr)) + ' − ' + esc(GharModel.fmtRs(working.absentDeduction))
+          + ' − ' + esc(GharModel.fmtRs(working.halfDeduction)) + ' − ' + esc(GharModel.fmtRs(working.advanceRecovery))
+          + ' = ' + esc(GharModel.fmtRs(working.netPkr)) + ' · ' + working.daysInMonth + ' days in the month.</p>';
+        if (locked) {
+          html += '<p class="muted"><strong>Paid on ' + esc(paid.paidDate) + ' — this month is locked and cannot be edited.</strong></p>'
+            + '<div class="row"><button type="button" class="small secondary" data-action="copy" data-helper="' + esc(s.id) + '">Copy statement for WhatsApp</button></div>';
+        } else {
+          html += '<div class="row"><button type="button" data-action="pay" data-helper="' + esc(s.id) + '">Mark paid</button>'
+            + '<button type="button" class="secondary" data-action="copy" data-helper="' + esc(s.id) + '">Copy statement for WhatsApp</button></div>';
+        }
+      }
+      html += '</div>';
+      return html;
     });
+    renderList('staff-list', 'staff-empty', rows);
+  }
+  function renderDeliveries() {
+    var month = monthInputVal('del-month');
+    var list = state.vault.deliveries || [];
+    var logSel = $('log-delivery');
+    if (logSel) {
+      logSel.innerHTML = list.map(function (d) {
+        return '<option value="' + esc(d.id) + '">' + esc(d.name) + ' — ' + esc(d.kind) + '</option>';
+      }).join('');
+    }
+    var refSel = $('refill-delivery');
+    if (refSel) {
+      // Refills are for gas cylinders only — other deliveries never take
+      // one. (Phase 5 second pass: the list used to offer every delivery,
+      // so a refill could be recorded against a doodhwala.)
+      var gas = list.filter(function (d) { return d.kind === 'Gas cylinder'; });
+      refSel.innerHTML = gas.length
+        ? gas.map(function (d) {
+            return '<option value="' + esc(d.id) + '">' + esc(d.name) + ' — ' + esc(d.kind) + '</option>';
+          }).join('')
+        : '<option value="">No gas cylinder delivery yet — add one above</option>';
+    }
+    var rows = list.map(function (d) {
+      var paid = GharModel.findPaidDeliveryMonth(d, month);
+      var locked = !!paid;
+      var total = null;
+      try { total = GharModel.deliveryMonthTotal(state.vault, d.id, month); }
+      catch (_e) { total = null; }
+      var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(d.name) + ' — ' + esc(d.kind)
+        + '<span class="sub">' + esc(GharModel.fmtRs(d.ratePkr)) + ' per ' + esc(d.unit)
+        + ' · usual ' + esc(String(d.usualQty)) + ' a day · as you entered it</span></div></div>';
+      if (d.kind === 'Gas cylinder') {
+        var last = GharModel.lastGasRefill(d);
+        var since = GharModel.gasDaysSinceLastRefill(d);
+        html += '<h3>Gas refills</h3>';
+        if (!last) html += '<p class="muted">No refill recorded yet.</p>';
+        else {
+          html += '<p class="muted">Last refill: ' + esc(last.date) + ' · ' + esc(GharModel.fmtRs(last.pricePkr))
+            + ' · ' + (since === 0 ? 'refilled today' : since + (since === 1 ? ' day ago' : ' days ago')) + '.</p>';
+          d.refills.forEach(function (r) {
+            html += '<div class="sum-row"><div class="nm">Refill ' + esc(r.date)
+              + '<span class="sub">as you entered it</span></div><span class="amt">'
+              + esc(GharModel.fmtRs(r.pricePkr)) + '</span></div>';
+          });
+        }
+      }
+      html += '<h3>Bill — ' + esc(month) + '</h3>';
+      if (total) {
+        if (total.lines.length === 0) html += '<p class="muted">Nothing logged this month yet — log a day below.</p>';
+        total.lines.forEach(function (ln) {
+          html += '<div class="sum-row"><div class="nm">' + esc(ln.text)
+            + '<span class="sub">added up from the daily log</span></div><span class="amt">'
+            + esc(GharModel.fmtRs(ln.amountPkr)) + '</span></div>';
+        });
+        html += '<div class="sum-total"><span>Total for ' + esc(month) + '</span><span>'
+          + esc(GharModel.fmtRs(total.totalPkr)) + '</span></div>'
+          + '<p class="muted">' + total.days + ' days logged · ' + total.skippedDays + ' skipped day'
+          + (total.skippedDays === 1 ? '' : 's') + ' (0 quantity) · each skipped day removes one day\u2019s charge.</p>';
+      }
+      if (locked) {
+        html += '<p class="muted"><strong>Paid on ' + esc(paid.paidDate) + ' — this month is locked and cannot be edited.</strong></p>';
+      } else if (total) {
+        html += '<div class="row"><button type="button" data-action="delpay" data-delivery="' + esc(d.id) + '">Mark paid</button></div>';
+      }
+      html += '</div>';
+      return html;
+    });
+    renderList('deliveries-list', 'deliveries-empty', rows);
+  }
+  function renderUdhaar() {
+    fillUdhaarSelects();
+    var people = state.vault.udhaar || [];
+    var rows = people.map(function (p) {
+      var bal = GharModel.udhaarPersonBalance(p);
+      var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(p.person)
+        + '<span class="sub">Lent outstanding ' + esc(GharModel.fmtRs(bal.lent))
+        + ' · Borrowed outstanding ' + esc(GharModel.fmtRs(bal.borrowed))
+        + ' · as you entered it</span></div></div>';
+      if (!p.entries || p.entries.length === 0) {
+        html += '<p class="muted">No entries for this person yet.</p>';
+      }
+      p.entries.forEach(function (e) {
+        var entryBal = GharModel.udhaarEntryBalance(e);
+        var repaid = (e.repayments || []).reduce(function (s, r) { return s + (Number(r.amountPkr) || 0); }, 0);
+        html += '<div class="sum-row"><div class="nm">' + esc(e.direction === 'lent' ? 'Lent ' : 'Borrowed ')
+          + esc(GharModel.fmtRs(e.amountPkr)) + ' on ' + esc(e.date)
+          + '<span class="sub">' + (e.reason ? esc(e.reason) + ' · ' : '')
+          + (e.dueDate ? 'due ' + esc(e.dueDate) + ' · ' : 'no due date · ')
+          + 'repaid ' + esc(GharModel.fmtRs(repaid)) + ' · forgiven ' + esc(GharModel.fmtRs(e.forgivenPkr))
+          + ' · as you entered it</span></div>'
+          + '<span class="amt">' + esc(GharModel.fmtRs(entryBal)) + ' left</span>'
+          + (e.settled ? '<span class="pill green">Settled — nothing outstanding</span>' : '')
+          + '</div>';
+        html += '<p class="muted">' + esc(GharModel.fmtRs(e.amountPkr)) + ' − ' + esc(GharModel.fmtRs(repaid))
+          + ' repaid − ' + esc(GharModel.fmtRs(e.forgivenPkr)) + ' forgiven = '
+          + esc(GharModel.fmtRs(entryBal)) + ' outstanding.</p>';
+        if (e.repayments && e.repayments.length) {
+          html += '<h3>Repayments</h3>';
+          e.repayments.forEach(function (r) {
+            html += '<div class="sum-row"><div class="nm">Repayment ' + esc(r.date)
+              + '<span class="sub">as you entered it</span></div><span class="amt">'
+              + esc(GharModel.fmtRs(r.amountPkr)) + '</span></div>';
+          });
+        }
+        if (e.forgivenPkr > 0) {
+          html += '<p class="muted">' + esc(GharModel.fmtRs(e.forgivenPkr))
+            + ' forgiven — recorded as forgiven, not as a payment.</p>';
+        }
+        html += '<div class="row"><button type="button" class="small secondary" data-action="reminder" data-person="'
+          + esc(p.id) + '" data-entry="' + esc(e.id) + '">Copy reminder for WhatsApp</button></div>';
+      });
+      html += '</div>';
+      return html;
+    });
+    renderList('udhaar-list', 'udhaar-empty', rows);
+  }
+  // The person/entry dropdowns on the Udhaar page follow the vault: the
+  // entry dropdowns follow their person dropdown.
+  function udhaarEntryOptions(person) {
+    return (person.entries || []).map(function (e) {
+      return '<option value="' + esc(e.id) + '">' + esc(e.direction) + ' ' + esc(GharModel.fmtRs(e.amountPkr))
+        + ' on ' + esc(e.date) + ' — balance ' + esc(GharModel.fmtRs(GharModel.udhaarEntryBalance(e)))
+        + (e.settled ? ' (settled)' : '') + '</option>';
+    }).join('');
+  }
+  function syncUdhaarEntrySelect(personSelId, entrySelId) {
+    var psel = $(personSelId), esel = $(entrySelId);
+    if (!psel || !esel) return;
+    var people = state.vault.udhaar || [];
+    var person = GharModel.findUdhaarPerson(state.vault, psel.value) || people[0] || null;
+    var prev = esel.value;
+    esel.innerHTML = person ? udhaarEntryOptions(person) : '';
+    if (prev) esel.value = prev;
+  }
+  function fillUdhaarSelects() {
+    var people = state.vault.udhaar || [];
+    var personOpts = people.map(function (p) {
+      return '<option value="' + esc(p.id) + '">' + esc(p.person) + '</option>';
+    }).join('');
+    ['udh-entry-person', 'repay-person', 'forgive-person'].forEach(function (id) {
+      var sel = $(id);
+      if (sel) {
+        var prev = sel.value;
+        sel.innerHTML = personOpts;
+        if (prev) sel.value = prev;
+      }
+    });
+    syncUdhaarEntrySelect('repay-person', 'repay-entry');
+    syncUdhaarEntrySelect('forgive-person', 'forgive-entry');
+  }
+  function renderBills() {
+    var today = GharModel.todayStr();
+    var bills = state.vault.bills || [];
+    var due = bills.filter(function (b) { return b.status === 'due'; });
+    var paid = bills.filter(function (b) { return b.status === 'paid'; });
+    function billRow(b) {
+      var d = GharModel.daysBetween(today, b.dueDate);
+      var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(b.type) + ' bill — ' + esc(b.provider)
+        + '<span class="sub">' + esc(GharModel.fmtRs(b.amountPkr)) + ' · due ' + esc(b.dueDate)
+        + (b.accountNo ? ' · account ' + esc(b.accountNo) : '')
+        + (b.surchargeNote ? ' · late-surcharge note: ' + esc(b.surchargeNote) : '')
+        + ' · as you entered it</span></div>'
+        + (b.status === 'due'
+          ? '<span class="pill' + (d < 0 ? ' amber' : '') + '">' + esc(GharModel.dueLabel({ daysUntil: d })) + '</span>'
+          : '<span class="pill green">Paid on ' + esc(b.paidDate) + '</span>')
+        + '</div>';
+      var delLabel = state.pendingDeleteBillId === b.id ? 'Tap again to delete' : 'Delete';
+      if (b.status === 'due') {
+        html += '<div class="row"><button type="button" data-action="billpay" data-bill="' + esc(b.id) + '">Mark paid</button>'
+          + '<button type="button" class="secondary" data-action="billdel" data-bill="' + esc(b.id) + '">' + delLabel + '</button></div>';
+      } else {
+        html += '<p class="muted">Paid on ' + esc(b.paidDate)
+          + ' — kept in history. Mark unpaid only if the tap was a mistake.</p>'
+          + '<div class="row"><button type="button" class="secondary" data-action="billunpay" data-bill="' + esc(b.id) + '">Mark unpaid</button>'
+          + '<button type="button" class="secondary" data-action="billdel" data-bill="' + esc(b.id) + '">' + delLabel + '</button></div>';
+      }
+      html += '</div>';
+      return html;
+    }
+    var rows = [];
+    if (due.length) {
+      rows.push('<h3>Due</h3>');
+      due.forEach(function (b) { rows.push(billRow(b)); });
+    }
+    if (paid.length) {
+      rows.push('<h3>Paid — history</h3>');
+      paid.forEach(function (b) { rows.push(billRow(b)); });
+    }
+    renderList('bills-list', 'bills-empty', rows);
+  }
+  // ---- documents + medicine (Phase 4) ----
+  function docCountdownText(doc) {
+    var d = GharModel.documentDaysUntil(doc);
+    if (d < 0) return 'EXPIRED ' + (-d) + ((-d) === 1 ? ' day ago' : ' days ago');
+    if (d === 0) return 'expires today';
+    return 'expires in ' + d + (d === 1 ? ' day' : ' days');
+  }
+  function renderDocuments() {
+    var today = GharModel.todayStr();
+    var docs = state.vault.documents || [];
+    var rows = docs.map(function (doc) {
+      var d = GharModel.documentDaysUntil(doc, today);
+      var expired = d < 0;
+      var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(doc.type) + ' — ' + esc(doc.owner)
+        + '<span class="sub">Expires ' + esc(doc.expiryDate)
+        + (doc.issueDate ? ' · issued ' + esc(doc.issueDate) : '')
+        + ' · as you entered it</span></div>'
+        + '<span class="pill' + (expired ? ' amber' : '') + '">' + esc(docCountdownText(doc)) + '</span></div>';
+      if (doc.photo && doc.photo.dataUrl) {
+        html += '<p class="muted"><a href="' + esc(doc.photo.dataUrl) + '" target="_blank" rel="noopener">'
+          + '<img src="' + esc(doc.photo.dataUrl) + '" alt="Photo of ' + esc(doc.type) + ' — ' + esc(doc.owner)
+          + '" style="max-width:120px;max-height:120px;border-radius:12px"></a>'
+          + '<br>Tap the photo to see it full size. Stored inside the book, as you picked it.</p>';
+      }
+      var checklist = GharModel.getChecklist(doc.type);
+      html += '<h3>Renewal checklist</h3>';
+      if (checklist) {
+        html += '<p class="muted">' + esc(checklist.title) + ' — updated ' + esc(checklist.updated) + '.</p><ul>';
+        checklist.items.forEach(function (item) {
+          html += '<li>' + esc(item) + '</li>';
+        });
+        html += '</ul><p class="muted">' + esc(checklist.note) + '</p>';
+      } else {
+        html += '<p class="muted">No checklist yet for this type.</p>';
+      }
+      var delLabel = state.pendingDeleteDocId === doc.id ? 'Tap again to delete' : 'Delete';
+      html += '<div class="row"><button type="button" class="secondary" data-action="docdel" data-doc="' + esc(doc.id) + '">' + delLabel + '</button></div>';
+      html += '</div>';
+      return html;
+    });
+    renderList('documents-list', 'documents-empty', rows);
+  }
+  function renderMedicine() {
+    var today = GharModel.todayStr();
+    var medDays = (state.vault.settings && state.vault.settings.reminders && state.vault.settings.reminders.medDays) || [30, 7];
+    var meds = state.vault.medicines || [];
+    var rows = meds.map(function (m) {
+      var w = GharModel.medicineWarnings(m, today, medDays);
+      var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(m.name) + (m.person ? ' — ' + esc(m.person) : '')
+        + '<span class="sub">' + esc(String(m.qtyLeft)) + ' ' + esc(m.unit) + ' left · expires ' + esc(m.expiryDate)
+        + (m.place ? ' · ' + esc(m.place) : '')
+        + (m.dosesPerDay != null ? ' · ' + esc(String(m.dosesPerDay)) + ' doses a day, as you typed it' : '')
+        + ' · as you entered it</span></div>'
+        + '<span class="pill' + (w.expired ? ' amber' : '') + '">'
+        + esc(w.expired ? 'EXPIRED ' + (-w.daysUntil) + ((-w.daysUntil) === 1 ? ' day ago' : ' days ago')
+          : w.daysUntil === 0 ? 'expires today'
+          : 'expires in ' + w.daysUntil + (w.daysUntil === 1 ? ' day' : ' days'))
+        + '</span></div>';
+      if (w.expired) {
+        html += '<p class="error">EXPIRED — do not use — check with a pharmacist.</p>';
+      } else if (w.daysUntil <= Math.max.apply(null, medDays)) {
+        // Expiry warning shows even when the medicine is also low stock:
+        // the two warnings are different problems. (Phase 5 second pass:
+        // the old condition hid the expiry warning whenever low stock
+        // was also true.)
+        html += '<p class="muted">Expires in ' + w.daysUntil + (w.daysUntil === 1 ? ' day' : ' days')
+          + ' — inside the reminder window (' + medDays.join(', ') + ' days).</p>';
+      }
+      if (w.lowStock) {
+        html += '<p class="muted"><strong>Low stock</strong> — ' + esc(String(m.qtyLeft)) + ' ' + esc(m.unit)
+          + ' left, and the low-stock number you set is ' + esc(String(m.lowStockAt)) + '.</p>';
+      }
+      if (m.dosesTaken && m.dosesTaken.length) {
+        var last = m.dosesTaken[m.dosesTaken.length - 1];
+        html += '<p class="muted">Doses taken: ' + m.dosesTaken.length
+          + ' · last ' + esc(last.date) + ' at ' + esc(last.time)
+          + ' · quantity drops by one each time you mark a dose.</p>';
+      } else {
+        html += '<p class="muted">No doses recorded yet — quantity drops by one each time you mark a dose.</p>';
+      }
+      var delLabel = state.pendingDeleteMedId === m.id ? 'Tap again to delete' : 'Delete';
+      html += '<div class="row"><button type="button" data-action="dose" data-med="' + esc(m.id) + '">Mark dose taken</button>'
+        + '<button type="button" class="secondary" data-action="meddel" data-med="' + esc(m.id) + '">' + delLabel + '</button></div>';
+      html += '</div>';
+      return html;
+    });
+    renderList('medicine-list', 'medicine-empty', rows);
+  }
+  function renderSummary() {
+    var month = monthInputVal('summary-month');
+    var vault = state.vault;
+    var hasRows = (vault.staff || []).length || (vault.deliveries || []).length
+      || (vault.udhaar || []).length || (vault.bills || []).length
+      || (vault.documents || []).length || (vault.medicines || []).length;
+    if (!hasRows) { renderList('summary-list', 'summary-empty', []); return; }
+    var s;
+    try { s = GharModel.summaryForMonth(vault, month); }
+    catch (_e) { renderList('summary-list', 'summary-empty', []); return; }
+    function row(label, sub, amount) {
+      return '<div class="sum-row"><div class="nm">' + esc(label)
+        + '<span class="sub">' + esc(sub) + '</span></div>'
+        + '<span class="amt">' + esc(amount) + '</span></div>';
+    }
+    function deltaLine(delta, prev, label) {
+      var word = delta > 0 ? 'more' : delta < 0 ? 'less' : 'the same as';
+      var amt = delta === 0 ? 'Rs 0' : GharModel.fmtRs(Math.abs(delta));
+      return '<p class="muted">' + esc(label) + ': ' + amt + ' ' + word + ' than last month ('
+        + esc(s.prevMonth) + ': ' + esc(GharModel.fmtRs(prev)) + ').</p>';
+    }
+    var html = '';
+    html += '<h3>Staff — ' + esc(month) + '</h3>';
+    html += row('Staff paid', s.staff.paidCount + ' helper' + (s.staff.paidCount === 1 ? '' : 's')
+      + ' marked paid this month · sum of the paid months\u2019 net pay',
+      GharModel.fmtRs(s.staff.paidPkr));
+    html += row('Staff pay still to pay', s.staff.unpaidCount + ' helper' + (s.staff.unpaidCount === 1 ? '' : 's')
+      + ' not yet marked paid · sum of their worked-out net pay for ' + month,
+      GharModel.fmtRs(s.staff.unpaidWorkingPkr));
+    html += row('Advances still outstanding', 'all helpers · sum of what is left to recover on every advance',
+      GharModel.fmtRs(s.staff.advancesOutstandingPkr));
+    html += deltaLine(s.compare.staffPaidDeltaPkr, s.compare.staffPaidPrevPkr, 'Staff paid');
+    html += '<h3>Deliveries — ' + esc(month) + '</h3>';
+    html += row('Deliveries total', s.deliveries.count + ' deliver' + (s.deliveries.count === 1 ? 'y' : 'ies')
+      + ' · added up from the daily logs for ' + month, GharModel.fmtRs(s.deliveries.totalPkr));
+    html += row('Deliveries paid', 'marked paid for ' + month, GharModel.fmtRs(s.deliveries.paidPkr));
+    html += row('Deliveries not yet paid', 'total − paid for ' + month, GharModel.fmtRs(s.deliveries.unpaidPkr));
+    html += deltaLine(s.compare.deliveriesDeltaPkr, s.compare.deliveriesPrevPkr, 'Deliveries total');
+    html += '<h3>Udhaar</h3>';
+    html += row('Lent — still outstanding', 'all open lent entries, all months · not a monthly total',
+      GharModel.fmtRs(s.udhaar.lentOutstandingPkr));
+    html += row('Borrowed — still outstanding', 'all open borrowed entries, all months · not a monthly total',
+      GharModel.fmtRs(s.udhaar.borrowedOutstandingPkr));
+    html += row('Lent in ' + month, 'entries dated in ' + month, GharModel.fmtRs(s.udhaar.lentThisMonthPkr));
+    html += row('Borrowed in ' + month, 'entries dated in ' + month, GharModel.fmtRs(s.udhaar.borrowedThisMonthPkr));
+    html += '<p class="muted">' + s.udhaar.settledCount + ' entr' + (s.udhaar.settledCount === 1 ? 'y' : 'ies')
+      + ' settled (balance zero).</p>';
+    html += '<h3>Bills — ' + esc(month) + '</h3>';
+    html += row('Bills paid in ' + month, s.bills.paidCount + ' bill' + (s.bills.paidCount === 1 ? '' : 's')
+      + ' with a paid date in ' + month, GharModel.fmtRs(s.bills.paidPkr));
+    html += row('Bills due in ' + month, s.bills.dueThisMonthCount + ' unpaid bill'
+      + (s.bills.dueThisMonthCount === 1 ? '' : 's') + ' with a due date in ' + month,
+      GharModel.fmtRs(s.bills.dueThisMonthPkr));
+    html += row('All unpaid bills', 'every bill still marked due, any month', GharModel.fmtRs(s.bills.dueAllPkr));
+    html += row('Overdue bills', 'unpaid and past the due date', GharModel.fmtRs(s.bills.overduePkr));
+    html += deltaLine(s.compare.billsPaidDeltaPkr, s.compare.billsPaidPrevPkr, 'Bills paid');
+    html += '<h3>Documents</h3>';
+    html += row('Expiring in ' + month, s.documents.expiringThisMonth.map(function (d) {
+      return d.type + ' — ' + d.owner + ' (' + d.expiryDate + ')';
+    }).join('; ') || 'none expiring this month', String(s.documents.expiringCount));
+    html += row('Already expired', 'expiry date already passed · as you entered it', String(s.documents.expiredCount));
+    html += '<h3>Medicine</h3>';
+    html += row('Expiring in ' + month, s.medicines.expiringThisMonth.map(function (m) {
+      return m.name + (m.person ? ' — ' + m.person : '') + ' (' + m.expiryDate + ')';
+    }).join('; ') || 'none expiring this month', String(s.medicines.expiringCount));
+    html += row('Already expired', 'expiry date already passed · do not use — check with a pharmacist',
+      String(s.medicines.expiredCount));
+    html += row('Low stock', 'quantity at or below the low-stock number you set', String(s.medicines.lowStockCount));
+    html += '<p class="muted">Every total above is recomputed from the section pages when this page opens — nothing here is stored. The CSV export below carries the same rows.</p>';
+    show($('summary-empty'), false);
+    $('summary-list').innerHTML = html;
+  }
+  // ---- CSV export (Phase 5) ----
+  function downloadText(filename, text, type) {
+    var blob = new Blob([text], { type: type || 'text/csv' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  }
+  function onCsvExport(section) {
+    setText('summary-error', '');
+    setText('summary-ok', '');
+    try {
+      if (typeof window === 'undefined' || !window.CsvExport) {
+        throw new Error('CSV export is not loaded in this browser — reload the page and try again.');
+      }
+      var month = monthInputVal('summary-month');
+      var sections = GharModel.sectionCsvRows(state.vault, month);
+      if (section === 'all') {
+        downloadText('ghar-ka-register-all-' + month + '.csv',
+          window.CsvExport.buildCombinedCsv(sections));
+        setText('summary-ok', 'All six sections exported as one CSV file for ' + month
+          + '. A CSV is plain text — anyone who opens the file can read it.');
+      } else {
+        var sec = sections[section];
+        if (!sec) throw new Error('Unknown section.');
+        downloadText('ghar-ka-register-' + section + '-' + month + '.csv',
+          window.CsvExport.rowsToCsv(sec.headers, sec.rows));
+        setText('summary-ok', 'Exported the ' + section + ' CSV for ' + month
+          + '. A CSV is plain text — anyone who opens the file can read it.');
+      }
+    } catch (e) {
+      setText('summary-error', (e && e.message) || 'Could not export the CSV.');
+    }
+  }
+  function fillProfile() {
+    setVal('profile-household', state.vault.householdName || '');
+    setVal('profile-monthstart', String(state.vault.monthStartDay || 1));
+  }
+  function renderSidebarName() {
+    var name = (state.vault && state.vault.householdName) || 'My Home';
+    setText('sidebar-name', name);
+  }
+  function renderPage(page) {
+    if (page === 'home') renderToday();
+    else if (page === 'staff') renderStaff();
+    else if (page === 'deliveries') renderDeliveries();
+    else if (page === 'udhaar') renderUdhaar();
+    else if (page === 'bills') renderBills();
+    else if (page === 'documents') renderDocuments();
+    else if (page === 'medicine') renderMedicine();
+    else if (page === 'summary') renderSummary();
+    else if (page === 'profile') fillProfile();
+  }
+  function renderAll() {
+    renderSidebarName();
+    renderToday();
+    renderStaff();
+    renderDeliveries();
+    renderUdhaar();
+    renderBills();
+    renderDocuments();
+    renderMedicine();
+    renderSummary();
+    fillProfile();
   }
 
-  // ---- Step 3: Intelligence — paste a bank SMS, the wallet updates itself ----
-  async function parseSmsClick() {
-    var draft = SmsParser.parseSms($('sms-text').value);
-    if (!draft) {
-      $('sms-error').textContent = "Couldn't read this message — paste the full SMS your bank or wallet sent. OTPs are never read.";
-      return;
+  // ---- staff + deliveries (Phase 2) ----
+  function actionEl(ev) {
+    var t = ev && ev.target;
+    while (t) {
+      if (t.dataset && t.dataset.action) return t;
+      t = t.parentElement || t.parentNode;
     }
-    await handleSmsDraft(draft, 'paste');
+    return null;
   }
-
-  // Shared by paste and SMS-screenshot: one parsed draft, one flow. An
-  // OCR draft NEVER updates directly — a misread amount must be
-  // correctable on the review card first, so it always goes to review,
-  // with the amount editable and the read text shown. Nothing is saved
-  // until the user approves. An SMS — pasted or screenshotted — never
-  // verifies a card (Hashir's rule): there is no verification call
-  // anywhere in this section.
-  async function handleSmsDraft(draft, source) {
-    var err = $('sms-error');
-    var box = $('sms-review');
-    var res = $('intel-result');
-    err.textContent = ''; box.innerHTML = ''; res.innerHTML = ''; hide(res);
-    state.smsDraft = null; state.intelUndo = null;
-    if (!draft) {
-      err.textContent = "Couldn't read this message — paste the full SMS your bank or wallet sent. OTPs are never read.";
-      return;
+  async function onStaffAdd() {
+    setText('staff-add-error', '');
+    setText('staff-add-ok', '');
+    try {
+      var s = GharModel.addStaff(state.vault, {
+        name: $('staff-name').value,
+        role: $('staff-role').value,
+        salaryPkr: parseInt($('staff-salary').value, 10),
+        joinedDate: $('staff-joined').value,
+        leavePerMonth: parseInt($('staff-leave').value, 10),
+        phone: $('staff-phone').value,
+      });
+      await persist();
+      setVal('staff-name', '');
+      setVal('staff-salary', '');
+      setVal('staff-phone', '');
+      renderStaff();
+      renderToday();
+      setText('staff-add-ok', 'Helper added: ' + s.name + ' (' + s.role + '), ' + GharModel.fmtRs(s.salaryPkr) + ' a month, as you entered it.');
+    } catch (e) {
+      setText('staff-add-error', (e.errors || [e.message]).join(' '));
     }
-    if (!state.vault.accounts.length) {
-      err.textContent = 'Add an account first, then paste an SMS for it.';
-      return;
+  }
+  async function onAdvanceAdd() {
+    setText('adv-error', '');
+    setText('adv-ok', '');
+    try {
+      var adv = GharModel.addAdvance(state.vault, $('adv-helper').value, {
+        amount: parseInt($('adv-amount').value, 10),
+        date: $('adv-date').value,
+        note: $('adv-note').value,
+        recovery: $('adv-recovery').value,
+        instalmentPkr: parseInt($('adv-instalment').value, 10),
+      });
+      await persist();
+      setVal('adv-amount', '');
+      setVal('adv-note', '');
+      setVal('adv-instalment', '');
+      renderStaff();
+      setText('adv-ok', 'Advance recorded: ' + GharModel.fmtRs(adv.amount) + ' on ' + adv.date
+        + (adv.recovery === 'instalments' ? ' (' + GharModel.fmtRs(adv.instalmentPkr) + ' a month)' : ' (full recovery)') + '.');
+    } catch (e) {
+      setText('adv-error', (e.errors || [e.message]).join(' '));
     }
-    draft.source = source || 'paste';
-    // Intelligence: an exact (provider + last-4) match updates directly —
-    // no amount entry, no account picking. OCR drafts never take this
-    // path (see above) — they always go to the review card.
-    var match = Intel.findIntelMatch(state.vault.accounts, draft.provider, draft.last4);
-    if (match.status === 'match' && draft.source !== 'ocr') {
-      try {
-        var out = Intel.applyIntelUpdate(state.vault, draft, match.account);
+  }
+  async function onStaffListClick(ev) {
+    var b = actionEl(ev);
+    if (!b) return;
+    var helper = GharModel.findStaff(state.vault, b.dataset.helper);
+    if (!helper) return;
+    var month = monthInputVal('staff-month');
+    try {
+      if (b.dataset.action === 'att') {
+        var dateStr = b.dataset.date;
+        var current = (helper.attendance && helper.attendance[dateStr]) || 'present';
+        var next = current === 'present' ? 'absent' : current === 'absent' ? 'half' : 'present';
+        GharModel.markAttendance(state.vault, helper.id, dateStr, next);
         await persist();
-        render();
-        var text = Intel.intelResultText(match.account, draft, out.prevBalance, out.newBalance, out.baselineSet);
-        res.innerHTML = '<div class="big">' + esc(text.line) + '</div>'
-          + (text.cross ? '<div class="cross">' + esc(text.cross) + '</div>' : '')
-          + '<button id="intel-undo-btn" class="secondary">Undo this update</button>';
-        show(res);
-        state.intelUndo = { txnId: out.txn.id, notifId: out.notifId };
-        $('intel-undo-btn').addEventListener('click', undoIntel);
-        $('sms-text').value = '';
-        showSecuring(match.account, 'Saved securely!');
-      } catch (e) {
-        err.textContent = e.message;
+        renderStaff();
+      } else if (b.dataset.action === 'pay') {
+        var rec = GharModel.markMonthPaid(state.vault, helper.id, month);
+        await persist();
+        renderStaff();
+        renderToday();
+        setText('staff-add-ok', 'Paid ' + helper.name + ' for ' + month + ': ' + GharModel.fmtRs(rec.netPkr) + '. The month is now locked.');
+      } else if (b.dataset.action === 'copy') {
+        var statement = GharModel.staffPayStatement(helper, month);
+        var box = $('staff-statement');
+        if (box) {
+          box.textContent = statement;
+          box.classList.remove('hidden');
+        }
+        if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+          try { await navigator.clipboard.writeText(statement); } catch (_e) { /* shown on screen instead */ }
+        }
+        setText('staff-add-ok', 'Statement ready below — copy it to WhatsApp. The app sends nothing itself.');
       }
-      return;
+    } catch (e) {
+      setText('staff-add-error', e.message || 'Could not do that.');
     }
-    // No match (or several match) -> the review card with the account picker.
-    // Nothing is saved until approved.
-    state.smsDraft = draft;
-    // Pre-select the matching account: same provider + last 4, else same provider.
-    var match = null;
-    if (draft.last4) match = state.vault.accounts.find(function (a) { return a.provider === draft.provider && a.last4 === draft.last4; });
-    if (!match) match = state.vault.accounts.find(function (a) { return a.provider === draft.provider; });
-    var div = document.createElement('div');
-    div.className = 'review';
-    // An OCR draft shows what the app read, and the amount is editable —
-    // a misread must be fixable before anything is saved.
-    var amountRow = draft.source === 'ocr'
-      ? '<label for="sms-amount">Amount (Rs) — fix it if the read is wrong</label><input id="sms-amount" type="text" inputmode="numeric" value="' + esc(String(draft.amount)) + '">'
-      : '<div>Amount: <strong>' + (draft.direction === 'debit' ? '−' : '+') + ' ' + esc(fmtRs(draft.amount)) + '</strong> (' + esc(draft.direction) + ')</div>';
-    div.innerHTML = '<h3>Review — nothing is saved yet</h3>' +
-      (draft.source === 'ocr'
-        ? '<div class="muted">Read from your screenshot — the image never left this device. Check it below; fix the amount if the read is wrong.</div>'
-          + '<div class="muted">“' + esc(draft.raw || '') + '”</div>' : '') +
-      '<div>Provider: <strong>' + esc(draft.provider) + '</strong></div>' +
-      amountRow +
-      '<div>Merchant: <strong>' + esc(draft.merchant || '— not in the SMS') + '</strong></div>' +
-      '<div>Date: <strong>' + esc(draft.date) + '</strong>' + (draft.dateGuessed ? ' <span class="muted">(no date in the SMS — today assumed)</span>' : '') + '</div>' +
-      (draft.availableBalance != null ? '<div>Bank says available balance: <strong>' + esc(fmtRs(draft.availableBalance)) + '</strong></div>' : '') +
-      '<label for="sms-account">Apply to account</label><select id="sms-account"></select>' +
-      '<div id="sms-balance-note" class="muted"></div>' +
-      '<div class="row"><button id="sms-approve-btn">Approve — save + update balance</button>' +
-      '<button id="sms-discard-btn" class="secondary">Discard</button></div>';
-    box.appendChild(div);
-    var sel = $('sms-account');
-    accountOptions(sel, match ? match.id : null);
-    var note = $('sms-balance-note');
-    // The amount the review card is about: the parsed amount, or the
-    // user's corrected amount on an OCR draft.
-    var currentDraftAmount = function () {
-      if (draft.source !== 'ocr') return draft.amount;
-      var el = $('sms-amount');
-      var n = el ? Math.round(Number(String(el.value).replace(/,/g, '').trim())) : NaN;
-      return Number.isFinite(n) && n > 0 ? n : draft.amount;
-    };
-    var updateNote = function () {
-      var a = state.vault.accounts.find(function (x) { return x.id === sel.value; });
-      if (!a) { note.textContent = ''; return; }
-      var amt = currentDraftAmount();
-      // Unknown balance (Phase 3.5): approving records the transaction;
-      // the balance stays unknown unless this SMS states an available
-      // balance — never show a computed number from nothing.
-      if (a.balance === null || a.balance === undefined) {
-        note.textContent = 'After approval, ' + a.nickname + ' records this transaction. Its balance is not set yet — it stays unknown'
-          + (draft.availableBalance != null
-            ? ' unless the bank\'s available balance (' + fmtRs(draft.availableBalance) + ') sets it.' : ' unless this SMS states an available balance.')
-          + ' Paste another SMS or upload a statement to set it.';
-        return;
-      }
-      var after = draft.direction === 'debit' ? a.balance - amt : a.balance + amt;
-      note.textContent = 'After approval, ' + a.nickname + ' will show ' + fmtRs(after)
-        + (draft.availableBalance != null && draft.availableBalance !== after
-          ? ' (bank says ' + fmtRs(draft.availableBalance) + ' — small differences happen when other transactions are not in the vault yet).' : '.');
-    };
-    sel.addEventListener('change', updateNote);
-    if (draft.source === 'ocr') $('sms-amount').addEventListener('input', updateNote);
-    updateNote();
-    $('sms-approve-btn').addEventListener('click', approveSms);
-    $('sms-discard-btn').addEventListener('click', function () { box.innerHTML = ''; $('sms-text').value = ''; state.smsDraft = null; });
   }
-
-  async function approveSms() {
-    var draft = state.smsDraft;
-    var accountId = $('sms-account').value;
-    if (!draft || !accountId) return;
-    // An OCR draft carries an editable amount: the user's correction is
-    // what gets saved, never the raw read. A bad correction is rejected
-    // instead of saved.
-    var amount = draft.amount;
-    if (draft.source === 'ocr') {
-      var amtEl = $('sms-amount');
-      var n = amtEl ? Math.round(Number(String(amtEl.value).replace(/,/g, '').trim())) : NaN;
-      if (!Number.isFinite(n) || n <= 0) {
-        $('sms-error').textContent = 'Amount must be a number greater than 0 — fix it before approving.';
-        return;
-      }
-      amount = n;
+  async function onDeliveryAdd() {
+    setText('del-add-error', '');
+    setText('del-add-ok', '');
+    try {
+      var d = GharModel.addDelivery(state.vault, {
+        name: $('del-name').value,
+        kind: $('del-kind').value,
+        unit: $('del-unit').value,
+        ratePkr: parseInt($('del-rate').value, 10),
+        usualQty: Number($('del-qty').value),
+      });
+      await persist();
+      setVal('del-name', '');
+      setVal('del-rate', '');
+      setVal('del-qty', '');
+      renderDeliveries();
+      setText('del-add-ok', 'Delivery added: ' + d.name + ' (' + d.kind + '), ' + GharModel.fmtRs(d.ratePkr) + ' per ' + d.unit + ', as you entered it.');
+    } catch (e) {
+      setText('del-add-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onLogDay() {
+    setText('log-error', '');
+    setText('log-ok', '');
+    try {
+      var logged = GharModel.logDelivery(state.vault, $('log-delivery').value, $('log-date').value, Number($('log-qty').value));
+      await persist();
+      renderDeliveries();
+      setText('log-ok', logged.qty === 0
+        ? 'Skipped day logged for ' + logged.date + ' — one day\u2019s charge removed.'
+        : 'Logged ' + logged.qty + ' on ' + logged.date + '.');
+    } catch (e) {
+      setText('log-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onRefillAdd() {
+    setText('refill-error', '');
+    setText('refill-ok', '');
+    if (!$('refill-delivery').value) {
+      setText('refill-error', 'Add a gas cylinder delivery first — refills are for gas cylinders only.');
+      return;
     }
     try {
-      var txn = VaultModel.addTransaction(state.vault, {
-        accountId, amount: amount, direction: draft.direction,
-        merchant: draft.merchant, date: draft.date, source: 'sms',
+      var r = GharModel.addGasRefill(state.vault, $('refill-delivery').value, {
+        date: $('refill-date').value,
+        pricePkr: parseInt($('refill-price').value, 10),
       });
-      VaultModel.approveTransaction(state.vault, txn.id);
-      // Baseline from the bank (Phase 3.5): the review path never
-      // bank-confirms (only the direct match does), but if the balance was
-      // unknown and this SMS states an available balance, that number IS
-      // the balance now.
-      var account = VaultModel.findAccount(state.vault, accountId);
-      var baselineSet = false;
-      if (account && (account.balance === null || account.balance === undefined) && draft.availableBalance != null) {
-        VaultModel.setBaselineFromBank(state.vault, accountId, draft.availableBalance, 'sms');
-        baselineSet = true;
-      }
       await persist();
-      $('sms-review').innerHTML = '';
-      $('sms-text').value = '';
-      state.smsDraft = null;
-      if (baselineSet) {
-        var res = $('intel-result');
-        res.innerHTML = '<div class="ok">Balance set from this SMS: ' + esc(fmtRs(account.balance)) + '.</div>';
-        show(res);
-      }
-      render();
+      setVal('refill-price', '');
+      renderDeliveries();
+      setText('refill-ok', 'Refill recorded: ' + r.date + ' · ' + GharModel.fmtRs(r.pricePkr) + ', as you entered it.');
     } catch (e) {
-      $('sms-error').textContent = e.message;
+      setText('refill-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onDeliveriesListClick(ev) {
+    var b = actionEl(ev);
+    if (!b || b.dataset.action !== 'delpay') return;
+    var month = monthInputVal('del-month');
+    try {
+      var rec = GharModel.markDeliveryMonthPaid(state.vault, b.dataset.delivery, month);
+      await persist();
+      renderDeliveries();
+      setText('del-add-ok', 'Marked paid for ' + month + ': ' + GharModel.fmtRs(rec.totalPkr) + '. The month is now locked.');
+    } catch (e) {
+      setText('del-add-error', e.message || 'Could not do that.');
     }
   }
 
-  async function undoIntel() {
-    if (!state.intelUndo) return;
-    var out = Intel.undoIntelUpdate(state.vault, state.intelUndo.txnId, state.intelUndo.notifId);
-    state.intelUndo = null;
-    await persist();
-    render();
-    var res = $('intel-result');
-    res.innerHTML = '<div class="big">Undone — balance ' + (out.balance === null || out.balance === undefined
-      ? 'still not set.' : 'back to ' + esc(fmtRs(out.balance)) + '.') + '</div>';
-    show(res);
+  // ---- udhaar + bills (Phase 3) ----
+  async function onUdhaarPersonAdd() {
+    setText('udh-person-error', '');
+    setText('udh-person-ok', '');
+    try {
+      var p = GharModel.addUdhaarPerson(state.vault, { person: $('udh-person-name').value });
+      await persist();
+      setVal('udh-person-name', '');
+      renderUdhaar();
+      setText('udh-person-ok', 'Person added: ' + p.person + '.');
+    } catch (e) {
+      setText('udh-person-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onUdhaarEntryAdd() {
+    setText('udh-entry-error', '');
+    setText('udh-entry-ok', '');
+    try {
+      var e = GharModel.addUdhaarEntry(state.vault, $('udh-entry-person').value, {
+        direction: $('udh-entry-direction').value,
+        amountPkr: parseInt($('udh-entry-amount').value, 10),
+        date: $('udh-entry-date').value,
+        reason: $('udh-entry-reason').value,
+        dueDate: $('udh-entry-due').value,
+      });
+      await persist();
+      setVal('udh-entry-amount', '');
+      setVal('udh-entry-reason', '');
+      setVal('udh-entry-due', '');
+      renderUdhaar();
+      renderToday();
+      setText('udh-entry-ok', 'Entry added: ' + e.direction + ' ' + GharModel.fmtRs(e.amountPkr)
+        + ' on ' + e.date + ', as you entered it.');
+    } catch (e) {
+      setText('udh-entry-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onRepayAdd() {
+    setText('repay-error', '');
+    setText('repay-ok', '');
+    try {
+      var r = GharModel.recordRepayment(state.vault, $('repay-person').value, $('repay-entry').value, {
+        amountPkr: parseInt($('repay-amount').value, 10),
+        date: $('repay-date').value,
+      });
+      await persist();
+      var person = GharModel.findUdhaarPerson(state.vault, $('repay-person').value);
+      var entry = person ? GharModel.findUdhaarEntry(person, $('repay-entry').value) : null;
+      var bal = entry ? GharModel.udhaarEntryBalance(entry) : 0;
+      setVal('repay-amount', '');
+      renderUdhaar();
+      renderToday();
+      setText('repay-ok', 'Repayment recorded: ' + GharModel.fmtRs(r.amountPkr) + ' on ' + r.date
+        + '. Balance now ' + GharModel.fmtRs(bal) + (entry && entry.settled ? ' — settled, nothing outstanding.' : '.'));
+    } catch (e) {
+      setText('repay-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onForgiveAdd() {
+    setText('forgive-error', '');
+    setText('forgive-ok', '');
+    try {
+      var res = GharModel.forgiveUdhaar(state.vault, $('forgive-person').value, $('forgive-entry').value,
+        parseInt($('forgive-amount').value, 10));
+      await persist();
+      setVal('forgive-amount', '');
+      renderUdhaar();
+      renderToday();
+      setText('forgive-ok', 'Recorded as forgiven: ' + GharModel.fmtRs(res.forgivenPkr)
+        + ' forgiven in total on this entry. Balance now ' + GharModel.fmtRs(res.balance)
+        + (res.settled ? ' — settled, nothing outstanding.' : '.'));
+    } catch (e) {
+      setText('forgive-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onUdhaarListClick(ev) {
+    var b = actionEl(ev);
+    if (!b || b.dataset.action !== 'reminder') return;
+    try {
+      var person = GharModel.findUdhaarPerson(state.vault, b.dataset.person);
+      var entry = person ? GharModel.findUdhaarEntry(person, b.dataset.entry) : null;
+      if (!person || !entry) throw new Error('That entry does not exist any more.');
+      var text = GharModel.udhaarReminderText(person, entry);
+      var box = $('udh-reminder');
+      if (box) {
+        box.textContent = text;
+        box.classList.remove('hidden');
+      }
+      if (typeof navigator !== 'undefined' && navigator.clipboard && navigator.clipboard.writeText) {
+        try { await navigator.clipboard.writeText(text); } catch (_e) { /* shown on screen instead */ }
+      }
+      setText('udh-entry-ok', 'Reminder ready below — copy it to WhatsApp. The app sends nothing itself.');
+    } catch (e) {
+      setText('udh-entry-error', e.message || 'Could not do that.');
+    }
+  }
+  async function onBillAdd() {
+    setText('bill-add-error', '');
+    setText('bill-add-ok', '');
+    try {
+      var bill = GharModel.addBill(state.vault, {
+        type: $('bill-type').value,
+        provider: $('bill-provider').value,
+        accountNo: $('bill-account').value,
+        amountPkr: parseInt($('bill-amount').value, 10),
+        dueDate: $('bill-due').value,
+        surchargeNote: $('bill-surcharge').value,
+      });
+      await persist();
+      setVal('bill-provider', '');
+      setVal('bill-account', '');
+      setVal('bill-amount', '');
+      setVal('bill-surcharge', '');
+      renderBills();
+      renderToday();
+      setText('bill-add-ok', 'Bill added: ' + bill.type + ' — ' + bill.provider + ', '
+        + GharModel.fmtRs(bill.amountPkr) + ' due ' + bill.dueDate + ', as you entered it.');
+    } catch (e) {
+      setText('bill-add-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onBillsListClick(ev) {
+    var b = actionEl(ev);
+    if (!b) return;
+    var bill = GharModel.findBill(state.vault, b.dataset.bill);
+    if (!bill) return;
+    try {
+      if (b.dataset.action === 'billpay') {
+        state.pendingDeleteBillId = null;
+        var paid = GharModel.markBillPaid(state.vault, bill.id);
+        await persist();
+        renderBills();
+        renderToday();
+        setText('bill-add-ok', 'Marked paid: ' + bill.type + ' — ' + bill.provider + ' on ' + paid.paidDate
+          + '. It stays in history below.');
+      } else if (b.dataset.action === 'billunpay') {
+        state.pendingDeleteBillId = null;
+        GharModel.markBillUnpaid(state.vault, bill.id);
+        await persist();
+        renderBills();
+        renderToday();
+        setText('bill-add-ok', 'Marked unpaid again: ' + bill.type + ' — ' + bill.provider
+          + '. It shows on Today again from its due date.');
+      } else if (b.dataset.action === 'billdel') {
+        if (state.pendingDeleteBillId !== bill.id) {
+          state.pendingDeleteBillId = bill.id;
+          renderBills();
+        } else {
+          state.pendingDeleteBillId = null;
+          GharModel.deleteBill(state.vault, bill.id);
+          await persist();
+          renderBills();
+          renderToday();
+          setText('bill-add-ok', 'Bill deleted: ' + bill.type + ' — ' + bill.provider + '.');
+        }
+      }
+    } catch (e) {
+      state.pendingDeleteBillId = null;
+      setText('bill-add-error', e.message || 'Could not do that.');
+    }
   }
 
-  // ---- Phase 3.6: SMS screenshot upload (Intelligence) ----
-  // No time to paste the SMS? Upload a screenshot of it instead. The
-  // image is read ON THIS DEVICE by the vendored OCR engine — it never
-  // leaves the phone or PC — and the text goes through the SAME parser
-  // and the SAME review flow as pasting. Nothing is saved until the user
-  // approves the review card, and an OCR draft never updates directly.
-  // An SMS screenshot never verifies a card (Hashir's rule).
-  async function onSmsShotFile() {
-    var err = $('sms-error');
-    var status = $('sms-shot-status');
-    err.textContent = ''; status.textContent = '';
-    var file = $('sms-shot').files[0];
-    if (!file) return;
-    var dataUrl;
-    try { dataUrl = await readFileAsDataUrl(file); }
-    catch (e) { err.textContent = e.message; $('sms-shot').value = ''; return; }
-    var checked = Ocr.validateScreenshotFile(dataUrl, file.size);
-    if (!checked.ok) { err.textContent = checked.errors.join(' '); $('sms-shot').value = ''; return; }
-    status.textContent = 'Reading your screenshot on this device — the image never leaves your phone or PC…';
-    var text;
-    try { text = await Ocr.recognizeImage(file); }
-    catch (e) {
-      err.textContent = 'Couldn\'t read this screenshot — try pasting the SMS text instead.';
-      status.textContent = '';
-      $('sms-shot').value = '';
-      return;
-    }
-    status.textContent = '';
-    $('sms-shot').value = '';
-    var draft = Ocr.parseSmsFromOcrText(text);
-    if (!draft) {
-      err.textContent = "Couldn't read this message — the screenshot may not be a bank SMS. OTPs are never read.";
-      return;
-    }
-    await handleSmsDraft(draft, 'ocr');
-  }
-
-  // ---- Step 3: CSV import ----
-  function onCsvFile() {
-    var file = $('csv-file').files[0];
-    var err = $('csv-error');
-    err.textContent = ''; $('csv-review').innerHTML = ''; state.csvDraft = null;
-    hide($('csv-mapping'));
-    if (!file) return;
-    var reader = new FileReader();
-    reader.onload = function () {
-      var parsed = CsvImport.parseCsv(String(reader.result || ''));
-      if (!parsed.headers.length || !parsed.rows.length) {
-        err.textContent = 'That file has no rows I can read. Upload a statement CSV with a header row.';
+  // ---- documents + medicine (Phase 4) ----
+  // Shrink a photo data URL to a JPEG of 500 KB or less, in the browser.
+  // Steps the JPEG quality down (0.9 -> 0.5), then shrinks the picture
+  // itself and tries again. If it still does not fit, it refuses with a
+  // plain message — the photo is never silently dropped, and nothing is
+  // stored half-shrunk. Refuses when the browser has no canvas/Image.
+  function downscalePhoto(dataUrl) {
+    return new Promise(function (resolve, reject) {
+      if (typeof Image === 'undefined' || typeof document === 'undefined') {
+        reject(new Error('This browser cannot shrink photos — pick a photo under 500 KB.'));
         return;
       }
-      var mapping = CsvImport.guessMapping(parsed.headers);
-      state.csvDraft = { parsed, mapping };
-      var fill = function (selId, value) {
-        var sel = $(selId);
-        sel.innerHTML = '';
-        parsed.headers.forEach(function (h) {
-          var o = document.createElement('option');
-          o.value = h; o.textContent = h;
-          if (h === value) o.selected = true;
-          sel.appendChild(o);
-        });
+      var img = new Image();
+      img.onload = function () {
+        try {
+          var canvas = document.createElement('canvas');
+          if (!canvas.getContext) {
+            reject(new Error('This browser cannot shrink photos — pick a photo under 500 KB.'));
+            return;
+          }
+          var maxDim = 1600;
+          var scale = 1;
+          if (Math.max(img.naturalWidth, img.naturalHeight) > maxDim) {
+            scale = maxDim / Math.max(img.naturalWidth, img.naturalHeight);
+          }
+          var attempt = function (dimScale, quality) {
+            var w = Math.max(1, Math.round(img.naturalWidth * scale * dimScale));
+            var h = Math.max(1, Math.round(img.naturalHeight * scale * dimScale));
+            canvas.width = w;
+            canvas.height = h;
+            var ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, w, h);
+            return canvas.toDataURL('image/jpeg', quality);
+          };
+          var out = null;
+          var quality = 0.9;
+          var dimScale = 1;
+          for (var round = 0; round < 12; round++) {
+            out = attempt(dimScale, quality);
+            if (GharModel.photoFitsCap(out)) break;
+            if (quality > 0.5) quality = Math.max(0.5, quality - 0.1);
+            else dimScale *= 0.75;
+            if (dimScale < 0.1) break;
+          }
+          if (!out || !GharModel.photoFitsCap(out)) {
+            reject(new Error('This photo is still over 500 KB after shrinking — try a smaller photo.'));
+            return;
+          }
+          resolve({ dataUrl: out, mime: 'image/jpeg' });
+        } catch (e) {
+          reject(new Error('This photo could not be shrunk — try a smaller photo.'));
+        }
       };
-      fill('csv-col-date', mapping.date);
-      fill('csv-col-amount', mapping.amount);
-      fill('csv-col-merchant', mapping.merchant);
-      var dirSel = $('csv-col-direction');
-      dirSel.innerHTML = '<option value="">— none (amount sign) —</option>';
-      parsed.headers.forEach(function (h) {
-        var o = document.createElement('option');
-        o.value = h; o.textContent = h;
-        if (h === mapping.direction) o.selected = true;
-        dirSel.appendChild(o);
-      });
-      accountOptions($('csv-account'), null);
-      show($('csv-mapping'));
-    };
-    reader.onerror = function () { err.textContent = 'Could not read that file.'; };
-    reader.readAsText(file);
-  }
-
-  function previewCsv() {
-    var draft = state.csvDraft;
-    var err = $('csv-error');
-    var box = $('csv-review');
-    err.textContent = ''; box.innerHTML = '';
-    if (!draft) return;
-    var mapping = {
-      date: $('csv-col-date').value,
-      amount: $('csv-col-amount').value,
-      merchant: $('csv-col-merchant').value,
-      direction: $('csv-col-direction').value,
-    };
-    var accountId = $('csv-account').value;
-    if (!accountId) { err.textContent = 'Pick the account these transactions belong to.'; return; }
-    var conv = CsvImport.rowsToTransactions(draft.parsed, mapping, accountId);
-    if (conv.errors.length) err.textContent = conv.errors.join(' ');
-    if (!conv.drafts.length) { err.textContent += (err.textContent ? ' ' : '') + 'No usable rows.'; return; }
-    var marked = CsvImport.markDuplicates(state.vault, conv.drafts);
-    state.csvDraft.marked = marked;
-    state.csvDraft.accountId = accountId;
-    var div = document.createElement('div');
-    div.className = 'review';
-    var html = '<h3>Review rows — tick the ones to save</h3><table><tr><th></th><th>Date</th><th>Merchant</th><th>Amount</th><th></th></tr>';
-    marked.forEach(function (d, i) {
-      html += '<tr><td><input type="checkbox" data-i="' + i + '"' + (d.duplicate ? '' : ' checked') + '></td>'
-        + '<td>' + esc(d.date) + '</td><td>' + esc(d.merchant || '—') + '</td>'
-        + '<td>' + (d.direction === 'debit' ? '−' : '+') + ' ' + esc(fmtRs(d.amount)) + '</td>'
-        + '<td>' + (d.duplicate ? '<span class="pill amber">duplicate — skipped</span>' : '') + '</td></tr>';
+      img.onerror = function () {
+        reject(new Error('This photo could not be read — pick the file again.'));
+      };
+      img.src = dataUrl;
     });
-    html += '</table><button id="csv-approve-btn">Approve selected — save + update balance</button>';
-    div.innerHTML = html;
-    box.appendChild(div);
-    $('csv-approve-btn').addEventListener('click', approveCsv);
   }
-
-  async function approveCsv() {
-    var draft = state.csvDraft;
-    if (!draft || !draft.marked) return;
-    var boxes = document.querySelectorAll('#csv-review input[type="checkbox"]');
-    var saved = 0;
+  // The photo file input: read the file, run the magic-byte test, and
+  // shrink it to 500 KB or less when it is over the cap. The shrunk
+  // photo waits in state.pendingDocPhoto until the document is added.
+  // Any failure shows a plain error — the photo is never silently
+  // dropped, and the document can still be added without it.
+  async function onDocPhotoChange() {
+    setText('doc-add-error', '');
+    setText('doc-photo-note', '');
+    state.pendingDocPhoto = null;
+    var input = $('doc-photo');
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    if (typeof FileReader === 'undefined') {
+      setText('doc-add-error', 'This browser cannot read photo files — add the document without a photo.');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = async function () {
+      try {
+        var dataUrl = String(reader.result || '');
+        var pv = GharModel.validatePhotoDataUrl(dataUrl);
+        if (!pv.ok) {
+          setText('doc-add-error', pv.errors.join(' '));
+          return;
+        }
+        if (GharModel.photoFitsCap(dataUrl)) {
+          state.pendingDocPhoto = { dataUrl: dataUrl, mime: pv.mime };
+          setText('doc-photo-note', 'Photo ready — under 500 KB, as you picked it.');
+          return;
+        }
+        setText('doc-photo-note', 'Photo is over 500 KB — shrinking it now…');
+        var shrunk = await downscalePhoto(dataUrl);
+        state.pendingDocPhoto = shrunk;
+        setText('doc-photo-note', 'Photo ready — shrunk to under 500 KB, as you picked it.');
+      } catch (e) {
+        state.pendingDocPhoto = null;
+        setText('doc-add-error', (e && e.message) || 'This photo could not be used — pick another one.');
+      }
+    };
+    reader.onerror = function () {
+      setText('doc-add-error', 'This photo could not be read — pick the file again.');
+    };
+    if (typeof reader.readAsDataURL === 'function') reader.readAsDataURL(file);
+    else setText('doc-add-error', 'This browser cannot read photo files — add the document without a photo.');
+  }
+  // Clear a picked photo without adding the document: the picked photo
+  // used to stay attached and land on the next document added.
+  // (Phase 5 second pass.)
+  function onDocPhotoClear() {
+    state.pendingDocPhoto = null;
+    var input = $('doc-photo');
+    if (input) input.value = '';
+    setText('doc-photo-note', '');
+    setText('doc-add-error', '');
+  }
+  async function onDocumentAdd() {
+    setText('doc-add-error', '');
+    setText('doc-add-ok', '');
     try {
-      boxes.forEach(function (box) {
-        if (!box.checked) return;
-        var d = draft.marked[Number(box.getAttribute('data-i'))];
-        if (d.duplicate) return;
-        var txn = VaultModel.addTransaction(state.vault, {
-          accountId: d.accountId, amount: d.amount, direction: d.direction,
-          merchant: d.merchant, date: d.date, source: 'csv',
-        });
-        VaultModel.approveTransaction(state.vault, txn.id);
-        saved++;
+      var doc = GharModel.addDocument(state.vault, {
+        type: $('doc-type').value,
+        owner: $('doc-owner').value,
+        issueDate: $('doc-issue').value,
+        expiryDate: $('doc-expiry').value,
+        photo: state.pendingDocPhoto,
       });
       await persist();
-      $('csv-review').innerHTML = '';
-      $('csv-file').value = '';
-      hide($('csv-mapping'));
-      state.csvDraft = null;
-      $('csv-error').textContent = saved ? '' : 'Nothing was selected.';
-      render();
+      state.pendingDocPhoto = null;
+      setVal('doc-owner', '');
+      setVal('doc-issue', '');
+      setVal('doc-expiry', '');
+      var photoInput = $('doc-photo');
+      if (photoInput) photoInput.value = '';
+      setText('doc-photo-note', '');
+      renderDocuments();
+      renderToday();
+      var d = GharModel.documentDaysUntil(doc);
+      setText('doc-add-ok', 'Document added: ' + doc.type + ' — ' + doc.owner + ', expires ' + doc.expiryDate
+        + (d < 0 ? ' (expired ' + (-d) + ' days ago)' : d === 0 ? ' (expires today)' : ' (expires in ' + d + ' days)')
+        + ', as you entered it.');
     } catch (e) {
-      $('csv-error').textContent = e.message;
+      setText('doc-add-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onDocumentsListClick(ev) {
+    var b = actionEl(ev);
+    if (!b || b.dataset.action !== 'docdel') return;
+    var doc = GharModel.findDocument(state.vault, b.dataset.doc);
+    if (!doc) return;
+    try {
+      if (state.pendingDeleteDocId !== doc.id) {
+        state.pendingDeleteDocId = doc.id;
+        renderDocuments();
+      } else {
+        state.pendingDeleteDocId = null;
+        GharModel.deleteDocument(state.vault, doc.id);
+        await persist();
+        renderDocuments();
+        renderToday();
+        setText('doc-add-ok', 'Document deleted: ' + doc.type + ' — ' + doc.owner + '.');
+      }
+    } catch (e) {
+      state.pendingDeleteDocId = null;
+      setText('doc-add-error', e.message || 'Could not do that.');
+    }
+  }
+  async function onMedicineAdd() {
+    setText('med-add-error', '');
+    setText('med-add-ok', '');
+    try {
+      var med = GharModel.addMedicine(state.vault, {
+        name: $('med-name').value,
+        qtyLeft: parseInt($('med-qty').value, 10),
+        unit: $('med-unit').value,
+        expiryDate: $('med-expiry').value,
+        place: $('med-place').value,
+        person: $('med-person').value,
+        dosesPerDay: $('med-doses').value,
+        lowStockAt: $('med-low').value,
+      });
+      await persist();
+      setVal('med-name', '');
+      setVal('med-qty', '');
+      setVal('med-unit', '');
+      setVal('med-expiry', '');
+      setVal('med-person', '');
+      setVal('med-doses', '');
+      setVal('med-low', '');
+      renderMedicine();
+      renderToday();
+      setText('med-add-ok', 'Medicine added: ' + med.name + ', ' + med.qtyLeft + ' ' + med.unit
+        + ' left, expires ' + med.expiryDate + ', as you entered it.');
+    } catch (e) {
+      setText('med-add-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onMedicineListClick(ev) {
+    var b = actionEl(ev);
+    if (!b) return;
+    var med = GharModel.findMedicine(state.vault, b.dataset.med);
+    if (!med) return;
+    try {
+      if (b.dataset.action === 'dose') {
+        state.pendingDeleteMedId = null;
+        var now = new Date();
+        var dateStr = GharModel.todayStr();
+        var timeStr = String(now.getHours()).padStart(2, '0') + ':' + String(now.getMinutes()).padStart(2, '0');
+        GharModel.recordDose(state.vault, med.id, { date: dateStr, time: timeStr });
+        await persist();
+        renderMedicine();
+        renderToday();
+        setText('med-add-ok', 'Dose recorded for ' + med.name + ' on ' + dateStr + ' at ' + timeStr
+          + ' — quantity now ' + med.qtyLeft + ' ' + med.unit + '.');
+      } else if (b.dataset.action === 'meddel') {
+        if (state.pendingDeleteMedId !== med.id) {
+          state.pendingDeleteMedId = med.id;
+          renderMedicine();
+        } else {
+          state.pendingDeleteMedId = null;
+          GharModel.deleteMedicine(state.vault, med.id);
+          await persist();
+          renderMedicine();
+          renderToday();
+          setText('med-add-ok', 'Medicine deleted: ' + med.name + '.');
+        }
+      }
+    } catch (e) {
+      state.pendingDeleteMedId = null;
+      setText('med-add-error', e.message || 'Could not do that.');
     }
   }
 
-  // ---- Step 4: encrypted backup ----
-  function exportBackup() {
-    var err = $('backup-error');
-    var ok = $('backup-ok');
-    err.textContent = ''; ok.textContent = '';
+  // ---- profile ----
+  async function onProfileSave() {
+    setText('profile-error', '');
+    setText('profile-ok', '');
+    try {
+      var res = GharModel.setHousehold(state.vault, {
+        householdName: $('profile-household').value,
+        monthStartDay: parseInt($('profile-monthstart').value, 10),
+      });
+      await persist();
+      setText('profile-ok', 'Saved. Household: ' + (res.householdName || 'My Home')
+        + ', month starts on day ' + res.monthStartDay + '.');
+      renderSidebarName();
+    } catch (e) {
+      setText('profile-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+
+  // ---- security: change PIN / change passphrase ----
+  async function onChangePin() {
+    setText('change-pin-error', '');
+    setText('change-pin-ok', '');
+    var oldPin = $('change-pin-old').value.trim();
+    var oldPass = $('change-pin-pass').value || '';
+    var next = $('change-pin-new').value.trim();
+    var next2 = $('change-pin-new2').value.trim();
+    if (!VaultCrypto.validPin(oldPin)) { setText('change-pin-error', 'Current PIN must be exactly 6 digits.'); return; }
+    if (!VaultCrypto.validPin(next)) { setText('change-pin-error', 'New PIN must be exactly 6 digits.'); return; }
+    if (next !== next2) { setText('change-pin-error', 'The two new PINs do not match.'); return; }
+    try {
+      var res = await VaultCrypto.unlockVault(oldPin, oldPass, state.envelope);
+      if (!GharModel.isGharVault(res.vault)) throw new Error('not-ghar');
+      var made = await VaultCrypto.createVault(next, oldPass, state.vault);
+      state.envelope = made.envelope;
+      state.key = made.key;
+      saveEnvelope();
+      setVal('change-pin-old', '');
+      setVal('change-pin-pass', '');
+      setVal('change-pin-new', '');
+      setVal('change-pin-new2', '');
+      setText('change-pin-ok', 'PIN changed. The book stays unlocked.');
+    } catch (e) {
+      setText('change-pin-error', e && e.code === 'DECRYPT_FAILED'
+        ? 'Current PIN (or passphrase) is wrong.'
+        : 'Could not change the PIN — try again.');
+    }
+  }
+  async function onChangePass() {
+    setText('change-pass-error', '');
+    setText('change-pass-ok', '');
+    var pin = $('change-pass-old').value.trim();
+    var oldPass = $('change-pass-pass').value || '';
+    var next = $('change-pass-new').value || '';
+    if (!VaultCrypto.validPin(pin)) { setText('change-pass-error', 'Current PIN must be exactly 6 digits.'); return; }
+    if (!VaultCrypto.validPassphrase(next)) { setText('change-pass-error', 'New passphrase must be empty or at least 4 characters.'); return; }
+    try {
+      var res = await VaultCrypto.unlockVault(pin, oldPass, state.envelope);
+      if (!GharModel.isGharVault(res.vault)) throw new Error('not-ghar');
+      var made = await VaultCrypto.createVault(pin, next, state.vault);
+      state.envelope = made.envelope;
+      state.key = made.key;
+      saveEnvelope();
+      setVal('change-pass-old', '');
+      setVal('change-pass-pass', '');
+      setVal('change-pass-new', '');
+      setText('change-pass-ok', next === ''
+        ? 'Passphrase removed. The book now opens with the PIN only.'
+        : 'Passphrase changed. The book now opens with the PIN + new passphrase.');
+    } catch (e) {
+      setText('change-pass-error', e && e.code === 'DECRYPT_FAILED'
+        ? 'Current PIN (or passphrase) is wrong.'
+        : 'Could not change the passphrase — try again.');
+    }
+  }
+
+  // ---- backup: encrypted export / import ----
+  function onExport() {
+    setText('backup-error', '');
+    setText('backup-ok', '');
     try {
       var backup = VaultCrypto.createBackup(state.envelope);
-      var blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
+      var text = JSON.stringify(backup, null, 2);
+      var stamp = new Date().toISOString().slice(0, 10);
+      var blob = new Blob([text], { type: 'application/json' });
+      var url = URL.createObjectURL(blob);
       var a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = 'card-vault-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      a.href = url;
+      a.download = 'ghar-ka-register-backup-' + stamp + '.json';
       document.body.appendChild(a);
       a.click();
-      setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
-      ok.textContent = 'Backup downloaded. It can only be restored with your PIN'
-        + ' (and passphrase, if you set one). Keep the file somewhere safe.';
+      a.remove();
+      setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+      setText('backup-ok', 'Backup exported. It opens only with this book\u2019s PIN (and passphrase, if you set one). Keep the file somewhere safe.');
     } catch (e) {
-      err.textContent = e.message;
+      setText('backup-error', (e && e.message) || 'Could not export the backup.');
     }
   }
-
-  function onImportFile() {
-    var file = $('import-file').files[0];
-    var err = $('backup-error');
-    var ok = $('backup-ok');
-    err.textContent = ''; ok.textContent = '';
+  function onImportFileChange() {
+    setText('backup-error', '');
+    setText('backup-ok', '');
+    var input = $('import-file');
+    var file = input.files && input.files[0];
     if (!file) return;
     var reader = new FileReader();
     reader.onload = function () {
-      var envelope;
       try {
-        envelope = VaultCrypto.parseBackup(String(reader.result || ''));
+        state.pendingImport = VaultCrypto.parseBackup(String(reader.result));
+        setText('backup-ok', 'Backup file read. Enter its PIN below, then tap Restore backup.');
       } catch (e) {
-        err.textContent = e.message;
-        $('import-file').value = '';
-        return;
+        state.pendingImport = null;
+        setText('backup-error', (e && e.message) || 'That file is not a backup.');
       }
-      var old = document.getElementById('import-prompt');
-      if (old) old.remove();
-      // Ask for the BACKUP's own PIN — it may differ from this vault's PIN.
-      var div = document.createElement('div');
-      div.className = 'review';
-      div.id = 'import-prompt';
-      div.innerHTML = '<h3>Restore this backup?</h3>'
-        + '<p class="muted">Restoring <strong>replaces</strong> the vault on this device with the backup. '
-        + 'Enter the PIN (and passphrase) that backup was created with.</p>'
-        + '<label for="import-pin">Backup PIN (6 digits)</label>'
-        + '<input id="import-pin" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">'
-        + '<label for="import-pass">Backup passphrase (only if one was set)</label>'
-        + '<input id="import-pass" type="password" placeholder="leave empty if none">'
-        + '<div class="row"><button id="import-restore-btn">Restore backup</button>'
-        + '<button id="import-cancel-btn" class="secondary">Cancel</button></div>';
-      $('backup-card').appendChild(div);
-      $('import-cancel-btn').addEventListener('click', function () {
-        div.remove(); $('import-file').value = '';
-      });
-      $('import-restore-btn').addEventListener('click', async function () {
-        var pin = $('import-pin').value.trim();
-        var pass = $('import-pass').value;
-        try {
-          var out = await VaultCrypto.unlockVault(pin, pass, envelope);
-          saveEnvelope(envelope);
-          state.key = out.key;
-          state.vault = VaultModel.migrateVault(out.vault);
-          state.lockout = VaultCrypto.recordSuccess();
-          saveLockout();
-          div.remove();
-          $('import-file').value = '';
-          ok.textContent = 'Backup restored. The vault on this device now holds the backup data.';
-          render();
-        } catch (e) {
-          err.textContent = e.code === 'DECRYPT_FAILED'
-            ? 'Wrong PIN or passphrase for this backup (or the file is damaged).'
-            : e.message;
-        }
-      });
     };
-    reader.onerror = function () { err.textContent = 'Could not read that file.'; };
+    reader.onerror = function () { setText('backup-error', 'Could not read that file.'); };
     reader.readAsText(file);
   }
-
-  function boot() {
-    loadStored();
-    populateProviders();
-    // Phase 3: sidebar navigation (hash routing) + bell + profile.
-    document.querySelectorAll('.nav-btn[data-page]').forEach(function (b) {
-      b.addEventListener('click', function () { location.hash = '#/' + b.getAttribute('data-page'); });
-    });
-    window.addEventListener('hashchange', function () { if (state.vault) showPage(currentRoute()); });
-    $('bell-btn').addEventListener('click', function (e) { e.stopPropagation(); toggleBell(); });
-    $('bell-mark-read').addEventListener('click', async function () {
-      if (state.vault && VaultModel.markAllNotificationsRead(state.vault) > 0) { await persist(); renderBell(); }
-    });
-    document.addEventListener('click', function (e) {
-      var panel = $('notif-panel');
-      if (!panel.classList.contains('hidden') && !panel.contains(e.target) && !$('bell-btn').contains(e.target)) closeBell();
-    });
-    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeBell(); });
-    $('monthly-banner-btn').addEventListener('click', function () { location.hash = '#/reconcile'; });
-    $('reconcile-export-btn').addEventListener('click', exportBackup);
-    $('reconcile-done-btn').addEventListener('click', markMonthlyCheckDoneClick);
-    $('reconcile-list').addEventListener('click', function (e) {
-      var btn = e.target.closest ? e.target.closest('[data-rec-skip]') : null;
-      if (btn) toggleReconcileSkip(btn.getAttribute('data-rec-skip'));
-    });
-    $('reconcile-list').addEventListener('change', function (e) {
-      var input = e.target.closest ? e.target.closest('input[data-proof-account]') : null;
-      if (input && input.files && input.files[0]) onReconcileProof(input.files[0], input.getAttribute('data-proof-account'));
-    });
-    $('wallet-add-btn').addEventListener('click', function () { location.hash = '#/add'; });
-    $('profile-dp-input').addEventListener('change', onProfileDpFile);
-    $('profile-save-btn').addEventListener('click', saveProfile);
-    $('setup-btn').addEventListener('click', setup);
-    $('unlock-btn').addEventListener('click', unlock);
-    $('totp-btn').addEventListener('click', totpSubmit);
-    $('totp-code').addEventListener('keydown', function (e) { if (e.key === 'Enter') totpSubmit(); });
-    $('2fa-toggle-btn').addEventListener('click', function () {
-      if (state.vault && state.vault.settings.twoFactor && state.vault.settings.twoFactor.enabled) {
-        hide($('2fa-setup')); show($('2fa-disable'));
-      } else {
-        start2faSetup();
+  async function onImportRestore() {
+    setText('backup-error', '');
+    setText('backup-ok', '');
+    if (!state.pendingImport) { setText('backup-error', 'Choose a backup file first.'); return; }
+    var pin = $('import-pin').value.trim();
+    var pass = $('import-pass').value || '';
+    if (!VaultCrypto.validPin(pin)) { setText('backup-error', 'Backup PIN must be exactly 6 digits.'); return; }
+    try {
+      var res = await VaultCrypto.unlockVault(pin, pass, state.pendingImport);
+      if (!GharModel.isGharVault(res.vault)) {
+        setText('backup-error', 'This backup is from the old Card Vault. It does not open here — an old backup restores only into the old code.');
+        return;
       }
-    });
-    $('2fa-copy-btn').addEventListener('click', function () {
-      var key = $('2fa-secret-text').textContent;
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(key).then(function () { $('2fa-copy-btn').textContent = 'Copied'; })
-          .catch(function () { $('2fa-copy-btn').textContent = 'Copy failed — select the key'; });
-      } else { $('2fa-copy-btn').textContent = 'Select the key and copy it'; }
-    });
-    $('2fa-confirm-btn').addEventListener('click', confirm2faSetup);
-    $('2fa-disable-btn').addEventListener('click', disable2fa);
-    $('autolock-select').addEventListener('change', async function () {
-      try {
-        VaultModel.setAutoLockMinutes(state.vault, Number($('autolock-select').value));
-        await persist();
-      } catch (e) { $('autolock-select').value = String(state.vault.settings.autoLockMinutes || 5); }
-    });
-    $('settings-hide-btn').addEventListener('click', function () {
-      state.hideBalances = !state.hideBalances;
-      $('hide-btn').textContent = state.hideBalances ? 'Show balances' : 'Hide balances';
-      render();
-    });
-    $('change-pin-btn').addEventListener('click', changePin);
-    $('change-pass-btn').addEventListener('click', changePassphrase);
-    $('show-codes-btn').addEventListener('click', regenerateBackupCodes);
-    // Phase 3.2: card actions (Edit / ↑ / ↓ / Remove) — one delegated
-    // handler on each list, so it survives render() rebuilding the rows.
-    function onCardAction(e) {
-      var btn = e.target.closest ? e.target.closest('[data-action]') : null;
-      if (!btn || btn.disabled) return;
-      var id = btn.getAttribute('data-id');
-      var action = btn.getAttribute('data-action');
-      if (action === 'edit') openEdit(id);
-      else if (action === 'move-up') moveCard(id, 'up');
-      else if (action === 'move-down') moveCard(id, 'down');
-      else if (action === 'remove') requestDelete(id);
-      else if (action === 'confirm-remove') confirmDelete(id);
-      else if (action === 'cancel-remove') cancelDelete();
-      else if (action === 'remove-proof') requestProofRemove(id);
-      else if (action === 'confirm-remove-proof') confirmProofRemove(id);
-      else if (action === 'cancel-remove-proof') cancelProofRemove();
+      state.envelope = state.pendingImport;
+      state.key = res.key;
+      state.vault = res.vault;
+      state.pendingImport = null;
+      saveEnvelope();
+      state.lockout = VaultCrypto.recordSuccess();
+      saveLockout();
+      state.lastActiveMs = Date.now();
+      setVal('import-pin', '');
+      setVal('import-pass', '');
+      showScreen('vault');
+      renderAll();
+      route();
+      setText('backup-ok', 'Backup restored. The book is open.');
+    } catch (e) {
+      setText('backup-error', e && e.code === 'DECRYPT_FAILED'
+        ? 'Wrong backup PIN (or passphrase).'
+        : ((e && e.message) || 'Could not restore that backup.'));
     }
-    $('accounts-list').addEventListener('click', onCardAction);
-    $('summary-list').addEventListener('click', onCardAction);
-    $('edit-save-btn').addEventListener('click', saveEdit);
-    $('edit-cancel-btn').addEventListener('click', cancelEdit);
-    $('lock-btn').addEventListener('click', lock);
-    $('add-account-btn').addEventListener('click', addAccount);
-    $('add-proof').addEventListener('change', onProofFile);
-    $('add-proof-selfcheck-btn').addEventListener('click', onProofSelfCheck);
-    $('add-shot').addEventListener('change', onScreenshotFile);
-    // If the card details change after a proof was attached, the proof no
-    // longer matches what was typed — clear it so it must be re-uploaded.
-    // The same goes for a verified screenshot.
-    ['add-provider', 'add-last4'].forEach(function (id) {
-      $(id).addEventListener('change', function () {
-        if (state.addProof) {
-          state.addProof = null;
-          state.addProofBalance = null;
-          $('add-proof').value = '';
-          $('add-proof-status').textContent = 'Card details changed — upload the statement again.';
-          hide($('add-proof-preview'));
-        }
-        if (state.addScreenshot) {
-          state.addScreenshot = null;
-          if (state.addProofBalance && state.addProofBalance.source === 'screenshot') state.addProofBalance = null;
-          $('add-shot').value = '';
-          $('add-shot-status').textContent = 'Card details changed — upload the screenshot again.';
-        }
-      });
-    });
-    $('sms-parse-btn').addEventListener('click', parseSmsClick);
-    $('sms-shot-btn').addEventListener('click', function () { $('sms-shot').click(); });
-    $('sms-shot').addEventListener('change', onSmsShotFile);
-    $('sms-text').addEventListener('paste', function () { setTimeout(parseSmsClick, 0); });
-    $('csv-file').addEventListener('change', onCsvFile);
-    $('csv-preview-btn').addEventListener('click', previewCsv);
-    $('export-btn').addEventListener('click', exportBackup);
-    $('import-file').addEventListener('change', onImportFile);
-    $('hide-btn').addEventListener('click', function () {
-      state.hideBalances = !state.hideBalances;
-      $('hide-btn').textContent = state.hideBalances ? 'Show balances' : 'Hide balances';
-      render();
-    });
-    ['pointerdown', 'keydown'].forEach(function (ev) {
-      document.addEventListener(ev, function () { state.lastActive = Date.now(); }, { passive: true });
-    });
-    setInterval(function () {
-      if (state.key && state.vault) {
-        var mins = (state.vault.settings && state.vault.settings.autoLockMinutes) || 5;
-        if (Date.now() - state.lastActive >= mins * 60 * 1000) lock();
-      }
-      refreshLockoutNote();
-    }, 20000);
-    if (!state.envelope) showScreen('setup');
-    else showScreen('unlock');
-    refreshLockoutNote();
   }
 
-  document.addEventListener('DOMContentLoaded', boot);
+  // ---- init ----
+  function init() {
+    loadStored();
+    state.lastActiveMs = Date.now();
+    $('setup-btn').addEventListener('click', onSetup);
+    $('setup-pin2').addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') onSetup();
+    });
+    $('unlock-btn').addEventListener('click', onUnlock);
+    $('unlock-pin').addEventListener('keydown', function (ev) {
+      if (ev.key === 'Enter') onUnlock();
+    });
+    $('lock-btn').addEventListener('click', lock);
+    $('profile-save-btn').addEventListener('click', onProfileSave);
+    $('staff-add-btn').addEventListener('click', onStaffAdd);
+    $('adv-add-btn').addEventListener('click', onAdvanceAdd);
+    $('staff-list').addEventListener('click', onStaffListClick);
+    $('staff-month').addEventListener('change', renderStaff);
+    $('del-add-btn').addEventListener('click', onDeliveryAdd);
+    $('log-btn').addEventListener('click', onLogDay);
+    $('refill-btn').addEventListener('click', onRefillAdd);
+    $('deliveries-list').addEventListener('click', onDeliveriesListClick);
+    $('del-month').addEventListener('change', renderDeliveries);
+    $('udh-person-add-btn').addEventListener('click', onUdhaarPersonAdd);
+    $('udh-entry-add-btn').addEventListener('click', onUdhaarEntryAdd);
+    $('repay-add-btn').addEventListener('click', onRepayAdd);
+    $('forgive-add-btn').addEventListener('click', onForgiveAdd);
+    $('udhaar-list').addEventListener('click', onUdhaarListClick);
+    $('repay-person').addEventListener('change', function () { syncUdhaarEntrySelect('repay-person', 'repay-entry'); });
+    $('forgive-person').addEventListener('change', function () { syncUdhaarEntrySelect('forgive-person', 'forgive-entry'); });
+    $('bill-add-btn').addEventListener('click', onBillAdd);
+    $('bills-list').addEventListener('click', onBillsListClick);
+    $('doc-add-btn').addEventListener('click', onDocumentAdd);
+    $('doc-photo').addEventListener('change', onDocPhotoChange);
+    $('doc-photo-clear-btn').addEventListener('click', onDocPhotoClear);
+    $('documents-list').addEventListener('click', onDocumentsListClick);
+    $('med-add-btn').addEventListener('click', onMedicineAdd);
+    $('medicine-list').addEventListener('click', onMedicineListClick);
+    setVal('staff-month', currentMonthKey());
+    setVal('del-month', currentMonthKey());
+    setVal('summary-month', currentMonthKey());
+    $('summary-month').addEventListener('change', renderSummary);
+    $('csv-staff-btn').addEventListener('click', function () { onCsvExport('staff'); });
+    $('csv-deliveries-btn').addEventListener('click', function () { onCsvExport('deliveries'); });
+    $('csv-udhaar-btn').addEventListener('click', function () { onCsvExport('udhaar'); });
+    $('csv-bills-btn').addEventListener('click', function () { onCsvExport('bills'); });
+    $('csv-documents-btn').addEventListener('click', function () { onCsvExport('documents'); });
+    $('csv-medicines-btn').addEventListener('click', function () { onCsvExport('medicines'); });
+    $('csv-all-btn').addEventListener('click', function () { onCsvExport('all'); });
+    $('change-pin-btn').addEventListener('click', onChangePin);
+    $('change-pass-btn').addEventListener('click', onChangePass);
+    $('export-btn').addEventListener('click', onExport);
+    $('import-file').addEventListener('change', onImportFileChange);
+    $('import-btn').addEventListener('click', onImportRestore);
+    Nav.PAGES.forEach(function (p) {
+      var btn = $('nav-' + p);
+      if (btn) btn.addEventListener('click', function () { window.location.hash = '#/' + p; });
+    });
+    window.addEventListener('hashchange', route);
+    document.addEventListener('click', markActive);
+    document.addEventListener('keydown', markActive);
+    document.addEventListener('input', markActive);
+    setInterval(autoLockCheck, 15000);
+    route();
+  }
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', init);
+  else init();
 })();
