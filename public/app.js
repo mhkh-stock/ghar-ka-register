@@ -25,6 +25,8 @@
     pendingDocPhoto: null,
     pendingDeleteDocId: null,
     pendingDeleteMedId: null,
+    pendingProfilePhoto: null,
+    pendingProfilePhotoRemove: false,
     currentPage: 'home',
   };
 
@@ -105,6 +107,8 @@
     state.vault = null;
     state.pendingImport = null;
     state.pendingDocPhoto = null;
+    state.pendingProfilePhoto = null;
+    state.pendingProfilePhotoRemove = false;
     state.pendingDeleteDocId = null;
     state.pendingDeleteMedId = null;
     setText('doc-photo-note', '');
@@ -164,6 +168,7 @@
       }
       state.key = res.key;
       state.vault = res.vault;
+      GharModel.normalizeHousehold(state.vault);
       state.lockout = VaultCrypto.recordSuccess();
       saveLockout();
       state.lastActiveMs = Date.now();
@@ -713,9 +718,41 @@
       setText('summary-error', (e && e.message) || 'Could not export the CSV.');
     }
   }
+  // The sidebar photo shows the stored profile picture when there is
+  // one; otherwise the "V" initials. Updated right after a profile
+  // save, without a reload.
+  function renderSidebarPhoto() {
+    var photo = state.vault && state.vault.photo;
+    var hasPhoto = !!(photo && photo.dataUrl);
+    var img = $('sidebar-photo');
+    var initials = $('sidebar-initials');
+    if (img) {
+      if (hasPhoto) img.src = photo.dataUrl;
+      show(img, hasPhoto);
+    }
+    if (initials) show(initials, !hasPhoto);
+  }
+  function showPhotoPreview(dataUrl) {
+    var preview = $('profile-photo-preview');
+    var initials = $('profile-photo-initials');
+    if (preview) {
+      if (dataUrl) preview.src = dataUrl;
+      show(preview, !!dataUrl);
+    }
+    if (initials) show(initials, !dataUrl);
+  }
   function fillProfile() {
-    setVal('profile-household', state.vault.householdName || '');
-    setVal('profile-monthstart', String(state.vault.monthStartDay || 1));
+    var hh = GharModel.normalizeHousehold(state.vault);
+    setVal('profile-household', hh.householdName || '');
+    setVal('profile-monthstart', String(hh.monthStartDay || 1));
+    setVal('profile-phone', hh.phone || '');
+    setVal('profile-email', hh.email || '');
+    state.pendingProfilePhoto = null;
+    state.pendingProfilePhotoRemove = false;
+    var input = $('profile-photo');
+    if (input) input.value = '';
+    setText('profile-photo-note', '');
+    showPhotoPreview(hh.photo && hh.photo.dataUrl ? hh.photo.dataUrl : null);
   }
   function renderSidebarName() {
     var name = (state.vault && state.vault.householdName) || 'My Home';
@@ -734,6 +771,7 @@
   }
   function renderAll() {
     renderSidebarName();
+    renderSidebarPhoto();
     renderToday();
     renderStaff();
     renderDeliveries();
@@ -1298,75 +1336,166 @@
   }
 
   // ---- profile ----
+  // The profile picture file input: same rules as a document photo —
+  // JPEG/PNG by magic bytes, shrunk to 500 KB or less when it is over
+  // the cap. The picked photo waits in state.pendingProfilePhoto until
+  // Save — nothing is stored by picking alone.
+  async function onProfilePhotoChange() {
+    setText('profile-error', '');
+    setText('profile-photo-note', '');
+    state.pendingProfilePhoto = null;
+    state.pendingProfilePhotoRemove = false;
+    var input = $('profile-photo');
+    var file = input && input.files && input.files[0];
+    if (!file) return;
+    if (typeof FileReader === 'undefined') {
+      setText('profile-error', 'This browser cannot read photo files — save without a photo.');
+      return;
+    }
+    var reader = new FileReader();
+    reader.onload = async function () {
+      try {
+        var dataUrl = String(reader.result || '');
+        var pv = GharModel.validatePhotoDataUrl(dataUrl);
+        if (!pv.ok) {
+          setText('profile-error', pv.errors.join(' '));
+          return;
+        }
+        if (GharModel.photoFitsCap(dataUrl)) {
+          state.pendingProfilePhoto = { dataUrl: dataUrl, mime: pv.mime };
+          showPhotoPreview(dataUrl);
+          setText('profile-photo-note', 'Photo ready — under 500 KB, as you picked it. Save to keep it.');
+          return;
+        }
+        setText('profile-photo-note', 'Photo is over 500 KB — shrinking it now…');
+        var shrunk = await downscalePhoto(dataUrl);
+        state.pendingProfilePhoto = shrunk;
+        showPhotoPreview(shrunk.dataUrl);
+        setText('profile-photo-note', 'Photo ready — shrunk to under 500 KB, as you picked it. Save to keep it.');
+      } catch (e) {
+        state.pendingProfilePhoto = null;
+        setText('profile-error', (e && e.message) || 'This photo could not be used — pick another one.');
+      }
+    };
+    reader.onerror = function () {
+      setText('profile-error', 'This photo could not be read — pick the file again.');
+    };
+    if (typeof reader.readAsDataURL === 'function') reader.readAsDataURL(file);
+    else setText('profile-error', 'This browser cannot read photo files — save without a photo.');
+  }
+  // Mark the picture for removal: the preview goes back to initials,
+  // and Save clears the stored photo. Picking a new photo after this
+  // cancels the removal.
+  function onProfilePhotoRemove() {
+    state.pendingProfilePhoto = null;
+    state.pendingProfilePhotoRemove = true;
+    var input = $('profile-photo');
+    if (input) input.value = '';
+    showPhotoPreview(null);
+    setText('profile-photo-note', 'Photo will be removed when you save.');
+    setText('profile-error', '');
+  }
   async function onProfileSave() {
     setText('profile-error', '');
     setText('profile-ok', '');
     try {
+      // The photo must pass the JPEG/PNG + 500 KB rules before anything
+      // is saved, so a bad photo saves nothing — not even the name,
+      // phone or email.
+      var pendingPhoto = null;
+      if (state.pendingProfilePhoto && !state.pendingProfilePhotoRemove) {
+        var pv = GharModel.validatePhotoDataUrl(state.pendingProfilePhoto.dataUrl);
+        if (!pv.ok) { setText('profile-error', pv.errors.join(' ')); return; }
+        if (!GharModel.photoFitsCap(state.pendingProfilePhoto.dataUrl)) {
+          setText('profile-error', 'Photo is larger than 500 KB — pick a smaller photo.');
+          return;
+        }
+        pendingPhoto = state.pendingProfilePhoto;
+      }
       var res = GharModel.setHousehold(state.vault, {
         householdName: $('profile-household').value,
         monthStartDay: parseInt($('profile-monthstart').value, 10),
+        phone: $('profile-phone').value,
+        email: $('profile-email').value,
       });
+      if (state.pendingProfilePhotoRemove) GharModel.setHouseholdPhoto(state.vault, null);
+      else if (pendingPhoto) GharModel.setHouseholdPhoto(state.vault, pendingPhoto);
       await persist();
+      state.pendingProfilePhoto = null;
+      state.pendingProfilePhotoRemove = false;
       setText('profile-ok', 'Saved. Household: ' + (res.householdName || 'My Home')
         + ', month starts on day ' + res.monthStartDay + '.');
       renderSidebarName();
+      renderSidebarPhoto();
     } catch (e) {
       setText('profile-error', (e.errors || [e.message]).join(' '));
     }
   }
 
   // ---- security: change PIN / change passphrase ----
+  // Both changes use the SAME current PIN + passphrase, typed once at
+  // the top of the Security page. A wrong current PIN/passphrase is
+  // one plain error in one place (security-error); each form's own
+  // fields report their own errors under their own button.
+  function currentCredentials() {
+    return {
+      pin: $('security-pin').value.trim(),
+      pass: $('security-pass').value || '',
+    };
+  }
+  function clearCredentials() {
+    setVal('security-pin', '');
+    setVal('security-pass', '');
+  }
   async function onChangePin() {
+    setText('security-error', '');
     setText('change-pin-error', '');
     setText('change-pin-ok', '');
-    var oldPin = $('change-pin-old').value.trim();
-    var oldPass = $('change-pin-pass').value || '';
+    var creds = currentCredentials();
     var next = $('change-pin-new').value.trim();
     var next2 = $('change-pin-new2').value.trim();
-    if (!VaultCrypto.validPin(oldPin)) { setText('change-pin-error', 'Current PIN must be exactly 6 digits.'); return; }
+    if (!VaultCrypto.validPin(creds.pin)) { setText('security-error', 'Current PIN must be exactly 6 digits.'); return; }
     if (!VaultCrypto.validPin(next)) { setText('change-pin-error', 'New PIN must be exactly 6 digits.'); return; }
     if (next !== next2) { setText('change-pin-error', 'The two new PINs do not match.'); return; }
     try {
-      var res = await VaultCrypto.unlockVault(oldPin, oldPass, state.envelope);
+      var res = await VaultCrypto.unlockVault(creds.pin, creds.pass, state.envelope);
       if (!GharModel.isGharVault(res.vault)) throw new Error('not-ghar');
-      var made = await VaultCrypto.createVault(next, oldPass, state.vault);
+      var made = await VaultCrypto.createVault(next, creds.pass, state.vault);
       state.envelope = made.envelope;
       state.key = made.key;
       saveEnvelope();
-      setVal('change-pin-old', '');
-      setVal('change-pin-pass', '');
+      clearCredentials();
       setVal('change-pin-new', '');
       setVal('change-pin-new2', '');
       setText('change-pin-ok', 'PIN changed. The book stays unlocked.');
     } catch (e) {
-      setText('change-pin-error', e && e.code === 'DECRYPT_FAILED'
+      setText('security-error', e && e.code === 'DECRYPT_FAILED'
         ? 'Current PIN (or passphrase) is wrong.'
         : 'Could not change the PIN — try again.');
     }
   }
   async function onChangePass() {
+    setText('security-error', '');
     setText('change-pass-error', '');
     setText('change-pass-ok', '');
-    var pin = $('change-pass-old').value.trim();
-    var oldPass = $('change-pass-pass').value || '';
+    var creds = currentCredentials();
     var next = $('change-pass-new').value || '';
-    if (!VaultCrypto.validPin(pin)) { setText('change-pass-error', 'Current PIN must be exactly 6 digits.'); return; }
+    if (!VaultCrypto.validPin(creds.pin)) { setText('security-error', 'Current PIN must be exactly 6 digits.'); return; }
     if (!VaultCrypto.validPassphrase(next)) { setText('change-pass-error', 'New passphrase must be empty or at least 4 characters.'); return; }
     try {
-      var res = await VaultCrypto.unlockVault(pin, oldPass, state.envelope);
+      var res = await VaultCrypto.unlockVault(creds.pin, creds.pass, state.envelope);
       if (!GharModel.isGharVault(res.vault)) throw new Error('not-ghar');
-      var made = await VaultCrypto.createVault(pin, next, state.vault);
+      var made = await VaultCrypto.createVault(creds.pin, next, state.vault);
       state.envelope = made.envelope;
       state.key = made.key;
       saveEnvelope();
-      setVal('change-pass-old', '');
-      setVal('change-pass-pass', '');
+      clearCredentials();
       setVal('change-pass-new', '');
       setText('change-pass-ok', next === ''
         ? 'Passphrase removed. The book now opens with the PIN only.'
         : 'Passphrase changed. The book now opens with the PIN + new passphrase.');
     } catch (e) {
-      setText('change-pass-error', e && e.code === 'DECRYPT_FAILED'
+      setText('security-error', e && e.code === 'DECRYPT_FAILED'
         ? 'Current PIN (or passphrase) is wrong.'
         : 'Could not change the passphrase — try again.');
     }
@@ -1429,6 +1558,7 @@
       state.envelope = state.pendingImport;
       state.key = res.key;
       state.vault = res.vault;
+      GharModel.normalizeHousehold(state.vault);
       state.pendingImport = null;
       saveEnvelope();
       state.lockout = VaultCrypto.recordSuccess();
@@ -1461,6 +1591,8 @@
     });
     $('lock-btn').addEventListener('click', lock);
     $('profile-save-btn').addEventListener('click', onProfileSave);
+    $('profile-photo').addEventListener('change', onProfilePhotoChange);
+    $('profile-photo-remove-btn').addEventListener('click', onProfilePhotoRemove);
     $('staff-add-btn').addEventListener('click', onStaffAdd);
     $('adv-add-btn').addEventListener('click', onAdvanceAdd);
     $('staff-list').addEventListener('click', onStaffListClick);

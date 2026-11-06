@@ -4,6 +4,7 @@
 // The vault object (version 2, inside the same encrypted envelope as the
 // old app — PBKDF2 + AES-256-GCM, see vault.js):
 //   { version: 2, householdName, monthStartDay,
+//     phone, email, photo: { dataUrl, mime } | null,
 //     staff: [{ id, name, role, salaryPkr, joinedDate, leavePerMonth,
 //               phone, advances: [{ id, amount, date, note,
 //               recovery: 'full'|'instalments', instalmentPkr, recoveredPkr }],
@@ -95,6 +96,9 @@ function emptyVault() {
     version: 2,
     householdName: '',
     monthStartDay: 1,
+    phone: '',
+    email: '',
+    photo: null,
     createdAt: new Date().toISOString(),
     staff: [],
     deliveries: [],
@@ -107,6 +111,33 @@ function emptyVault() {
 }
 
 // ---- Household settings (Profile page) ----
+// Phone and email are optional contact details, stored as entered.
+// Phone accepts Pakistani mobile shapes loosely: digits, spaces and
+// dashes, with a leading +92 or 0. Email needs only the plain shape
+// name@example.com — the app takes it as typed, nothing more.
+function validatePhone(phone) {
+  const s = trimStr(phone, 20);
+  if (!s) return null;
+  if (String(phone).trim().length > 20) {
+    return 'Phone must be at most 20 characters.';
+  }
+  if (!/^\+?[0-9][0-9 \-]*$/.test(s)) {
+    return 'Phone must be a mobile number — digits, spaces and dashes only.';
+  }
+  const digits = s.replace(/[^0-9]/g, '').length;
+  if (digits < 7 || digits > 15) {
+    return 'Phone must have 7 to 15 digits.';
+  }
+  return null;
+}
+function validateEmail(email) {
+  const s = trimStr(email, 80);
+  if (!s) return null;
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s)) {
+    return 'Email must look like name@example.com.';
+  }
+  return null;
+}
 function setHousehold(vault, input) {
   const errors = [];
   if (!vault || typeof vault !== 'object') throw fail('VALIDATION', 'Vault is required.');
@@ -115,10 +146,66 @@ function setHousehold(vault, input) {
   if (!Number.isInteger(day) || day < 1 || day > 28) {
     errors.push('month start day must be a day from 1 to 28');
   }
+  const phone = trimStr(input && input.phone, 20);
+  const phoneErr = validatePhone(phone);
+  if (phoneErr) errors.push(phoneErr);
+  const email = trimStr(input && input.email, 80);
+  const emailErr = validateEmail(email);
+  if (emailErr) errors.push(emailErr);
   if (errors.length) throw fail('VALIDATION', 'Household settings are not valid.', errors);
   vault.householdName = name;
   vault.monthStartDay = day;
-  return { householdName: name, monthStartDay: day };
+  vault.phone = phone;
+  vault.email = email;
+  return { householdName: name, monthStartDay: day, phone: phone, email: email };
+}
+// The profile picture lives inside the vault, encrypted with everything
+// else — never as a separate file, never sent anywhere. It is a JPEG or
+// PNG data URL (magic bytes, same as document photos) already shrunk to
+// 500 KB or less by the app before saving; this is the backstop, so a
+// photo over the cap is refused instead of stored half-shrunk.
+// photo null removes the picture.
+function setHouseholdPhoto(vault, photo) {
+  if (!vault || typeof vault !== 'object') throw fail('VALIDATION', 'Vault is required.');
+  if (photo === undefined || photo === null) {
+    vault.photo = null;
+    return null;
+  }
+  if (typeof photo !== 'object' || typeof photo.dataUrl !== 'string'
+    || photo.dataUrl.indexOf('data:image/') !== 0) {
+    throw fail('VALIDATION', 'Profile picture is not valid.', ['photo must be a JPEG/PNG data URL or empty']);
+  }
+  const pv = validatePhotoDataUrl(photo.dataUrl);
+  if (!pv.ok) throw fail('VALIDATION', 'Profile picture is not valid.', pv.errors);
+  if (!photoFitsCap(photo.dataUrl)) {
+    throw fail('VALIDATION', 'Profile picture is not valid.',
+      ['photo is larger than 500 KB — it is shrunk in the app before saving']);
+  }
+  vault.photo = { dataUrl: photo.dataUrl, mime: pv.mime || photo.mime };
+  return vault.photo;
+}
+// A vault saved before the phone/email/photo fields existed has none of
+// them. Read it as empty contact details and no picture — the book
+// opens and renders exactly as before. New vaults already carry every
+// field, so this changes nothing for them.
+function normalizeHousehold(vault) {
+  if (!vault || typeof vault !== 'object') throw fail('VALIDATION', 'Vault is required.');
+  if (typeof vault.householdName !== 'string') vault.householdName = '';
+  if (!Number.isInteger(vault.monthStartDay) || vault.monthStartDay < 1 || vault.monthStartDay > 28) {
+    vault.monthStartDay = 1;
+  }
+  if (typeof vault.phone !== 'string') vault.phone = '';
+  if (typeof vault.email !== 'string') vault.email = '';
+  if (vault.photo !== null && (typeof vault.photo !== 'object' || typeof vault.photo.dataUrl !== 'string')) {
+    vault.photo = null;
+  }
+  return {
+    householdName: vault.householdName,
+    monthStartDay: vault.monthStartDay,
+    phone: vault.phone,
+    email: vault.email,
+    photo: vault.photo,
+  };
 }
 
 // ---- Staff ----
@@ -1417,7 +1504,8 @@ if (typeof module !== 'undefined' && module.exports) {
     MEDICINE_PLACES, ATTENDANCE_MARKS, MAX_MONEY, MAX_PHOTO_BYTES,
     newId, roundRs, isIntRs, isDateStr, todayStr, daysBetween, fmtRs,
     isMonthKey, daysInMonth, monthKeyOf,
-    isGharVault, emptyVault, setHousehold,
+    isGharVault, emptyVault, setHousehold, validatePhone, validateEmail,
+    setHouseholdPhoto, normalizeHousehold,
     validateStaff, addStaff, findStaff,
     markAttendance, attendanceCounts, addAdvance, advanceRemaining,
     staffRemainingAdvance, advanceMonthRecovery, payWorkingForHelper,
@@ -1448,7 +1536,8 @@ if (typeof window !== 'undefined') {
     MEDICINE_PLACES, ATTENDANCE_MARKS, MAX_MONEY, MAX_PHOTO_BYTES,
     newId, roundRs, isIntRs, isDateStr, todayStr, daysBetween, fmtRs,
     isMonthKey, daysInMonth, monthKeyOf,
-    isGharVault, emptyVault, setHousehold,
+    isGharVault, emptyVault, setHousehold, validatePhone, validateEmail,
+    setHouseholdPhoto, normalizeHousehold,
     validateStaff, addStaff, findStaff,
     markAttendance, attendanceCounts, addAdvance, advanceRemaining,
     staffRemainingAdvance, advanceMonthRecovery, payWorkingForHelper,
