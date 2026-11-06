@@ -10,7 +10,7 @@
 <header class="topbar">
   <div class="brand"><span class="logo">V</span><h1>Personal Card Vault</h1></div>
   <span class="centre-pill">🔒 Card details are encrypted end-to-end…</span>
-  <span class="profile-chip"><span id="topbar-dp-initials" class="dp-initials small">V</span><img id="topbar-dp" class="dp-img small hidden" alt="Your photo"><span id="topbar-name">My Vault</span></span>
+  <a class="profile-chip" href="#/profile" aria-label="Open your profile"><span id="topbar-dp-initials" class="dp-initials small">V</span><img id="topbar-dp" class="dp-img small hidden" alt="Your photo"><span id="topbar-name">My Vault</span></a>
   <span id="lock-pill" class="lock-pill locked">Locked</span>
 </header>
 <main>
@@ -66,14 +66,14 @@
   <section id="vault-screen" class="hidden">
     <div class="app-shell">
       <aside id="sidebar" class="glass" aria-label="Vault navigation">
-        <div class="sidebar-profile">
+        <a class="sidebar-profile" href="#/profile" aria-label="Open your profile">
           <span id="sidebar-dp-initials" class="dp-initials">V</span>
           <img id="sidebar-dp" class="dp-img hidden" alt="Your photo">
           <div class="sidebar-name-wrap">
             <span id="sidebar-name" class="sidebar-name">My Vault</span>
             <span class="muted small">Personal Card Vault</span>
           </div>
-        </div>
+        </a>
         <nav id="sidebar-nav" aria-label="Vault pages">
           <button class="nav-btn" id="nav-wallet" data-page="wallet">🏠 <span class="nav-label">Wallet</span></button>
           <button class="nav-btn" id="nav-add" data-page="add">＋ <span class="nav-label">Add Card</span></button>

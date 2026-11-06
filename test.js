@@ -762,6 +762,22 @@ async function main() {
     && appJs.includes('markAllNotificationsRead') && appJs.includes('unreadNotificationCount')
     && appJs.includes('migrateVault(out.vault)') && appJs.includes("hide($('totp-screen'))"));
 
+  // ---- §9c. Clickable profile headers (Hashir's call 2026-11-06: the DP + name
+  // on top — sidebar header and top-bar chip — open the Profile page) ----
+  check('Profile: the sidebar header is a link to the Profile page (DP + name kept)',
+    html.includes('<a class="sidebar-profile" href="#/profile"')
+    && html.includes('id="sidebar-dp"') && html.includes('id="sidebar-name"'));
+  check('Profile: the top-bar chip is a link to the Profile page (DP + name kept)',
+    html.includes('<a class="profile-chip" href="#/profile"')
+    && html.includes('id="topbar-dp"') && html.includes('id="topbar-name"'));
+  check('Profile: both profile links route through the hash router to the Profile page',
+    N.routeForHash('#/profile') === 'profile'
+    && [...html.matchAll(/<a class="(?:sidebar-profile|profile-chip)" href="([^"]+)"/g)]
+      .every((m) => m[1] === '#/profile'));
+  check('Profile: the clickable headers have a hover + keyboard-focus style',
+    css.includes('.sidebar-profile:hover') && css.includes('.sidebar-profile:focus-visible')
+    && css.includes('.topbar .profile-chip:hover') && css.includes('.topbar .profile-chip:focus-visible'));
+
   // 5e. Live smoke on a throwaway port (the real port 3036 is checked by hand below).
   const { spawn } = require('node:child_process');
   const TEST_PORT = 3037;

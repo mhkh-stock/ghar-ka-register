@@ -60,7 +60,10 @@ header.topbar {
   font-size: 13px; font-weight: 700; color: #2b2118; white-space: nowrap;
   background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.6);
   border-radius: 999px; padding: 3px 12px 3px 3px;
+  text-decoration: none; cursor: pointer;
 }
+.topbar .profile-chip:hover { background: rgba(255,255,255,.85); }
+.topbar .profile-chip:focus-visible { outline: 2px solid #14532d; outline-offset: 2px; }
 header .tag { font-size: 12px; color: #5f4c3a; }
 
 /* Top padding + scroll margins: content must never hide under the sticky
@@ -84,7 +87,9 @@ main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 16px; }
   position: sticky; top: 84px; flex: 0 0 230px;
   padding: 14px; z-index: 10;
 }
-.sidebar-profile { display: flex; align-items: center; gap: 10px; padding: 4px 6px 12px; border-bottom: 1px solid rgba(120,90,60,.18); }
+.sidebar-profile { display: flex; align-items: center; gap: 10px; padding: 4px 6px 12px; border-bottom: 1px solid rgba(120,90,60,.18); text-decoration: none; cursor: pointer; border-radius: 10px; }
+.sidebar-profile:hover { background: rgba(255,255,255,.45); }
+.sidebar-profile:focus-visible { outline: 2px solid #14532d; outline-offset: 2px; }
 .sidebar-name-wrap { display: flex; flex-direction: column; min-width: 0; }
 .sidebar-name { font-weight: 800; font-size: 15px; color: #2b2118; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #sidebar-nav { margin-top: 10px; }
