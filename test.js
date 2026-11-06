@@ -202,6 +202,50 @@ async function main() {
   check('Nav: no vault-era routes survive (#/reconcile, #/wallet, #/add, #/intelligence)',
     !/#\/(reconcile|wallet|add|intelligence)/.test(htmlSrc));
 
+  // ---- §4b. One layout sequence on every page (Task 4) ----
+  // One h2 per screen/page (the title only); back-link first where one
+  // exists; sections as h3 in the fixed order form -> list -> actions
+  // -> notes; page sections in the file in sidebar order.
+  function sectionBody(id) {
+    const start = htmlSrc.indexOf('id="' + id + '"');
+    if (start < 0) return null;
+    return htmlSrc.slice(htmlSrc.lastIndexOf('<section', start), htmlSrc.indexOf('</section>', start));
+  }
+  const seqPages = ['setup-screen', 'unlock-screen', 'page-home', 'page-staff', 'page-deliveries',
+    'page-udhaar', 'page-bills', 'page-documents', 'page-medicine', 'page-summary',
+    'page-security', 'page-backup', 'page-profile'];
+  check('Layout: every screen/page has exactly one h2 (the title only)',
+    seqPages.every((id) => {
+      const b = sectionBody(id);
+      return b && (b.match(/<h2[\s>]/g) || []).length === 1;
+    }));
+  check('Layout: the back-link is first on every page that has one (not Today)',
+    ['page-staff', 'page-deliveries', 'page-udhaar', 'page-bills', 'page-documents',
+      'page-medicine', 'page-summary', 'page-security', 'page-backup', 'page-profile']
+      .every((id) => {
+        const b = sectionBody(id);
+        return b && b.slice(b.indexOf('>') + 1).trim().startsWith('<a class="back-link"');
+      }));
+  check('Layout: page sections in index.html follow the sidebar order',
+    seqPages.every((id, i) => i === 0 || htmlSrc.indexOf('id="' + seqPages[i - 1] + '"') < htmlSrc.indexOf('id="' + id + '"')));
+  function h3s(id) {
+    const b = sectionBody(id) || '';
+    return [...b.matchAll(/<h3[^>]*>([^<]*)<\/h3>/g)].map((m) => m[1].trim());
+  }
+  check('Layout: Staff sections run form -> list -> action',
+    JSON.stringify(h3s('page-staff')) === JSON.stringify(['Add a helper', 'Helpers', 'Record an advance']), h3s('page-staff'));
+  check('Layout: Security sections run credentials -> change PIN -> change passphrase -> notes',
+    JSON.stringify(h3s('page-security')) === JSON.stringify(['Your current PIN and passphrase', 'Change PIN', 'Change passphrase', 'How your book is protected']), h3s('page-security'));
+  check('Layout: Summary sections run figures -> export',
+    JSON.stringify(h3s('page-summary')) === JSON.stringify(["This month's figures", 'Export — CSV']), h3s('page-summary'));
+  check('Layout: no duplicate current-PIN/passphrase fields survive on Security',
+    !htmlSrc.includes('id="change-pin-old"') && !htmlSrc.includes('id="change-pin-pass"')
+    && !htmlSrc.includes('id="change-pass-old"') && !htmlSrc.includes('id="change-pass-pass"')
+    && htmlSrc.includes('id="security-pin"') && htmlSrc.includes('id="security-pass"'));
+  check('Layout: the sidebar Lock book button does not share the Security lock icon',
+    htmlSrc.includes('id="lock-btn"') && !/>🔒 <span class="nav-label">Lock book<\/span>/.test(htmlSrc)
+    && />🚪 <span class="nav-label">Lock book<\/span>/.test(htmlSrc));
+
   // ---- §5. Model: vault shape, household, every collection, Today ----
   const v0 = M.emptyVault();
   check('Model: emptyVault is version 2 with all six collections empty',
@@ -233,6 +277,78 @@ async function main() {
     check('Model: setHousehold rejects month start day ' + JSON.stringify(bad),
       throwsCode(() => M.setHousehold(M.emptyVault(), { householdName: 'H', monthStartDay: bad }), 'VALIDATION'));
   }
+
+  // Profile contact details + picture (phone/email optional, photo in the vault).
+  const vP = M.emptyVault();
+  check('Model: emptyVault carries empty phone/email and no photo',
+    vP.phone === '' && vP.email === '' && vP.photo === null);
+  for (const good of ['0300 1234567', '+92 300 1234567', '0300-1234567', '03001234567']) {
+    check('Model: setHousehold accepts phone ' + JSON.stringify(good),
+      M.setHousehold(M.emptyVault(), { householdName: 'H', monthStartDay: 1, phone: good }).phone === good);
+  }
+  for (const bad of ['abc', '0300', '0300#123', 'x'.repeat(21), '++92 300 1234567']) {
+    check('Model: setHousehold rejects phone ' + JSON.stringify(bad),
+      throwsCode(() => M.setHousehold(M.emptyVault(), { householdName: 'H', monthStartDay: 1, phone: bad }), 'VALIDATION'));
+  }
+  for (const good of ['a@b.com', 'hashir.name@example.pk']) {
+    check('Model: setHousehold accepts email ' + good,
+      M.setHousehold(M.emptyVault(), { householdName: 'H', monthStartDay: 1, email: good }).email === good);
+  }
+  for (const bad of ['no-at', 'a@b', 'a b@c.com', 'a@@b.com', '@b.com']) {
+    check('Model: setHousehold rejects email ' + JSON.stringify(bad),
+      throwsCode(() => M.setHousehold(M.emptyVault(), { householdName: 'H', monthStartDay: 1, email: bad }), 'VALIDATION'));
+  }
+  check('Model: setHousehold allows empty phone and email',
+    (() => { const r = M.setHousehold(M.emptyVault(), { householdName: 'H', monthStartDay: 1, phone: '', email: '' }); return r.phone === '' && r.email === ''; })());
+  check('Model: a bad phone or email saves nothing (vault unchanged)',
+    (() => {
+      const v = M.emptyVault();
+      M.setHousehold(v, { householdName: 'Before', monthStartDay: 3, phone: '03001234567', email: 'a@b.com' });
+      try { M.setHousehold(v, { householdName: 'After', monthStartDay: 4, phone: 'abc', email: 'bad' }); } catch (_e) { /* expected */ }
+      return v.householdName === 'Before' && v.monthStartDay === 3 && v.phone === '03001234567' && v.email === 'a@b.com';
+    })());
+  // Profile picture: JPEG/PNG by magic bytes, 500 KB cap, remove = null.
+  const tinyJpeg = 'data:image/jpeg;base64,' + Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).toString('base64');
+  const tinyPng = 'data:image/png;base64,' + Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]).toString('base64');
+  const tinyGif = 'data:image/gif;base64,' + Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]).toString('base64');
+  const bigJpeg = 'data:image/jpeg;base64,' + Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF]), Buffer.alloc(600 * 1024, 0)]).toString('base64');
+  check('Model: setHouseholdPhoto stores a JPEG and reads its true mime',
+    (() => { const v = M.emptyVault(); const p = M.setHouseholdPhoto(v, { dataUrl: tinyJpeg, mime: 'image/png' }); return p && p.mime === 'image/jpeg' && v.photo === p; })());
+  check('Model: setHouseholdPhoto stores a PNG',
+    (() => { const v = M.emptyVault(); return M.setHouseholdPhoto(v, { dataUrl: tinyPng, mime: 'image/png' }).mime === 'image/png'; })());
+  check('Model: setHouseholdPhoto rejects a GIF (not JPEG/PNG)',
+    throwsCode(() => M.setHouseholdPhoto(M.emptyVault(), { dataUrl: tinyGif, mime: 'image/gif' }), 'VALIDATION'));
+  check('Model: setHouseholdPhoto rejects a text file',
+    throwsCode(() => M.setHouseholdPhoto(M.emptyVault(), { dataUrl: 'data:text/plain;base64,aGVsbG8=', mime: 'text/plain' }), 'VALIDATION'));
+  check('Model: setHouseholdPhoto refuses a photo over 500 KB (the app shrinks it first)',
+    throwsCode(() => M.setHouseholdPhoto(M.emptyVault(), { dataUrl: bigJpeg, mime: 'image/jpeg' }), 'VALIDATION'));
+  check('Model: setHouseholdPhoto(null) removes the picture',
+    (() => { const v = M.emptyVault(); M.setHouseholdPhoto(v, { dataUrl: tinyJpeg, mime: 'image/jpeg' }); return M.setHouseholdPhoto(v, null) === null && v.photo === null; })());
+  check('Model: normalizeHousehold fills missing phone/email/photo on an old vault',
+    (() => {
+      const v = M.emptyVault();
+      delete v.phone; delete v.email; delete v.photo;
+      const hh = M.normalizeHousehold(v);
+      return hh.phone === '' && hh.email === '' && hh.photo === null
+        && v.phone === '' && v.email === '' && v.photo === null;
+    })());
+  check('Model: normalizeHousehold keeps phone/email/photo that are already there',
+    (() => {
+      const v = M.emptyVault();
+      M.setHousehold(v, { householdName: 'H', monthStartDay: 2, phone: '03001234567', email: 'a@b.com' });
+      M.setHouseholdPhoto(v, { dataUrl: tinyJpeg, mime: 'image/jpeg' });
+      const hh = M.normalizeHousehold(v);
+      return hh.phone === '03001234567' && hh.email === 'a@b.com' && hh.photo !== null && hh.photo.dataUrl === tinyJpeg;
+    })());
+  check('Model: profile round-trip — phone/email/photo survive a save + reload',
+    (() => {
+      const v = M.emptyVault();
+      M.setHousehold(v, { householdName: 'H', monthStartDay: 2, phone: '+92 300 1234567', email: 'a@b.com' });
+      M.setHouseholdPhoto(v, { dataUrl: tinyPng, mime: 'image/png' });
+      const reloaded = JSON.parse(JSON.stringify(v));
+      const hh = M.normalizeHousehold(reloaded);
+      return hh.phone === '+92 300 1234567' && hh.email === 'a@b.com' && hh.photo && hh.photo.dataUrl === tinyPng;
+    })());
 
   // Staff.
   const vS = M.emptyVault();
@@ -1455,7 +1571,13 @@ async function main() {
       Date: FakeDate,
       Blob: class { constructor(parts) { this.parts = parts; blobs.push(this); } },
       URL: { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} },
-      FileReader: class { readAsText() {} },
+      FileReader: class {
+        readAsText() {}
+        readAsDataURL(file) {
+          this.result = (file && file._dataUrl) || '';
+          if (typeof this.onload === 'function') this.onload();
+        }
+      },
       location: { hash: '' },
       localStorage: {
         getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -1530,14 +1652,90 @@ async function main() {
       await sleep(50);
       return el('profile-error').textContent.includes('1 to 28');
     })());
-  // Change PIN (old 123456 -> new 654321).
+  // Profile: phone + email save and survive leaving the page and coming back.
+  ctx.location.hash = '#/profile';
+  ctx._dispatchWin('hashchange');
+  el('profile-household').value = 'Hashir Home';
+  el('profile-monthstart').value = '5';
+  el('profile-phone').value = '0300 1234567';
+  el('profile-email').value = 'hashir@example.com';
+  el('profile-save-btn').click();
+  check('Shell: profile save stores phone and email',
+    await waitFor(() => el('profile-ok').textContent.includes('Saved')));
+  ctx.location.hash = '#/home';
+  ctx._dispatchWin('hashchange');
+  ctx.location.hash = '#/profile';
+  ctx._dispatchWin('hashchange');
+  check('Shell: phone and email are still there after leaving and returning to Profile',
+    el('profile-phone').value === '0300 1234567' && el('profile-email').value === 'hashir@example.com');
+  check('Shell: profile rejects a bad phone and saves nothing',
+    await (async () => {
+      el('profile-phone').value = 'abc';
+      el('profile-save-btn').click();
+      await sleep(50);
+      ctx.location.hash = '#/home';
+      ctx._dispatchWin('hashchange');
+      ctx.location.hash = '#/profile';
+      ctx._dispatchWin('hashchange');
+      return el('profile-error').textContent.includes('Phone') && el('profile-phone').value === '0300 1234567';
+    })());
+  check('Shell: profile rejects a bad email',
+    await (async () => {
+      el('profile-email').value = 'not-an-email';
+      el('profile-save-btn').click();
+      await sleep(50);
+      return el('profile-error').textContent.includes('Email');
+    })());
+  el('profile-email').value = 'hashir@example.com';
+  el('profile-save-btn').click();
+  await waitFor(() => el('profile-ok').textContent.includes('Saved'));
+  // Profile picture: pick a small JPEG, save, sidebar shows it; remove it, save, sidebar hides it.
+  const shellJpeg = 'data:image/jpeg;base64,' + Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10]).toString('base64');
+  el('profile-photo').files = [{ _dataUrl: shellJpeg }];
+  el('profile-photo').dispatch('change');
+  check('Shell: picking a small JPEG photo shows it in the preview',
+    await waitFor(() => !isHidden('profile-photo-preview') && isHidden('profile-photo-initials')));
+  el('profile-save-btn').click();
+  check('Shell: saving the profile puts the photo in the sidebar (no reload)',
+    await waitFor(() => el('profile-ok').textContent.includes('Saved') && !isHidden('sidebar-photo') && el('sidebar-photo').src === shellJpeg));
+  el('profile-photo-remove-btn').click();
+  el('profile-save-btn').click();
+  check('Shell: removing the photo and saving hides the sidebar photo again',
+    await waitFor(() => el('profile-ok').textContent.includes('Saved') && isHidden('sidebar-photo') && !isHidden('sidebar-initials')));
+  // A photo over 500 KB reaches the shrinker; this test shell has no
+  // canvas, so it refuses cleanly instead of storing a huge photo.
+  const shellBig = 'data:image/jpeg;base64,' + Buffer.concat([Buffer.from([0xFF, 0xD8, 0xFF]), Buffer.alloc(600 * 1024, 0)]).toString('base64');
+  el('profile-photo').files = [{ _dataUrl: shellBig }];
+  el('profile-photo').dispatch('change');
+  check('Shell: a photo over 500 KB is refused, never stored half-shrunk',
+    await waitFor(() => el('profile-error').textContent.includes('cannot shrink')));
+  // Change PIN (old 123456 -> new 654321), using the single shared credentials.
   ctx.location.hash = '#/security';
   ctx._dispatchWin('hashchange');
-  el('change-pin-old').value = '123456'; el('change-pin-pass').value = '';
+  el('security-pin').value = '123456'; el('security-pass').value = '';
   el('change-pin-new').value = '654321'; el('change-pin-new2').value = '654321';
   el('change-pin-btn').click();
-  check('Shell: change PIN works',
+  check('Shell: change PIN works off the single shared credentials',
     await waitFor(() => el('change-pin-ok').textContent.includes('PIN changed')));
+  // Change passphrase off the SAME single credentials (new PIN 654321).
+  el('security-pin').value = '654321'; el('security-pass').value = '';
+  el('change-pass-new').value = 'house-pass';
+  el('change-pass-btn').click();
+  check('Shell: change passphrase works off the same single credentials',
+    await waitFor(() => el('change-pass-ok').textContent.includes('Passphrase changed')));
+  // Remove the passphrase again (credentials: new PIN + the passphrase just set).
+  el('security-pin').value = '654321'; el('security-pass').value = 'house-pass';
+  el('change-pass-new').value = '';
+  el('change-pass-btn').click();
+  check('Shell: removing the passphrase works off the same single credentials',
+    await waitFor(() => el('change-pass-ok').textContent.includes('Passphrase removed')));
+  // Wrong credentials fail once, in one place, and change nothing.
+  el('security-pin').value = '000000'; el('security-pass').value = '';
+  el('change-pin-new').value = '111111'; el('change-pin-new2').value = '111111';
+  el('change-pin-btn').click();
+  check('Shell: wrong current PIN fails once with one error and changes nothing',
+    await waitFor(() => el('security-error').textContent.includes('Current PIN (or passphrase) is wrong'))
+    && el('change-pin-ok').textContent === '');
   // Lock, then unlock with the NEW pin.
   el('lock-btn').click();
   check('Shell: lock shows the unlock screen and hides the book',
