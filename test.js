@@ -646,8 +646,10 @@ async function main() {
     check('Phase 2: addAdvance for an unknown helper fails (NOT_FOUND)',
       throwsCode(() => M.addAdvance(v, 'nope', { amount: 500, date: '2026-11-05', recovery: 'full' }), 'NOT_FOUND'));
   }
-  // Acceptance: Rs 15,000 salary, 3 absent days, Rs 2,000 advance (full
-  // recovery) pays Rs 15,000 − 1,500 − 2,000 = Rs 11,500, every line shown.
+  // Acceptance (paid leave, Hashir 2026-11-06): Rs 15,000 salary,
+  // 3 absent days, Rs 2,000 advance (full recovery), 2 days paid leave
+  // -> the first 2 absent days are free, so it pays
+  // Rs 15,000 − 500 − 2,000 = Rs 12,500, every line shown.
   {
     const { v, s } = payVault();
     M.markAttendance(v, s.id, '2026-11-01', 'absent');
@@ -655,33 +657,197 @@ async function main() {
     M.markAttendance(v, s.id, '2026-11-03', 'absent');
     M.addAdvance(v, s.id, { amount: 2000, date: '2026-11-05', recovery: 'full' });
     const w = M.computeMonthPay(v, s.id, '2026-11');
-    check('Phase 2 acceptance: 15,000 − 3 absent − 2,000 advance = 11,500 net',
+    check('Phase 2 acceptance (paid leave): 15,000 − 3 absent (2 free) − 2,000 advance = 12,500 net',
       w.salaryPkr === 15000 && w.absentDays === 3 && w.halfDays === 0
-      && w.absentDeduction === 1500 && w.halfDeduction === 0
-      && w.advanceRecovery === 2000 && w.netPkr === 11500 && w.daysInMonth === 30, w);
+      && w.freeDaysUsed === 2 && w.freeDaysLeft === 0
+      && w.chargedAbsentDays === 1 && w.chargedHalfDays === 0
+      && w.absentDeduction === 500 && w.halfDeduction === 0
+      && w.advanceRecovery === 2000 && w.netPkr === 12500 && w.daysInMonth === 30, w);
     const stmt = M.staffPayStatement(s, '2026-11');
-    check('Phase 2: WhatsApp statement contains every working line',
+    check('Phase 2: WhatsApp statement contains every working line (paid leave shown)',
       stmt.includes('Ayesha') && stmt.includes('2026-11')
       && stmt.includes('Monthly salary: Rs 15,000')
-      && stmt.includes('Absent days: 3 x Rs 500 = Rs 1,500')
+      && stmt.includes('Paid leave used: 2 days — Rs 0')
+      && stmt.includes('Absent days: 1 x Rs 500 = Rs 500')
       && stmt.includes('Half days: 0 x Rs 250 = Rs 0')
       && stmt.includes('Advance recovery: Rs 2,000')
-      && stmt.includes('Net payable: Rs 15,000 - Rs 1,500 - Rs 0 - Rs 2,000 = Rs 11,500')
+      && stmt.includes('Net payable: Rs 15,000 - Rs 500 - Rs 0 - Rs 2,000 = Rs 12,500')
       && stmt.includes('as you entered it'), stmt);
+    // Same rows with NO paid leave left: the old number stands.
+    const v0 = M.emptyVault();
+    const s0 = M.addStaff(v0, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-01', leavePerMonth: 0 });
+    M.markAttendance(v0, s0.id, '2026-11-01', 'absent');
+    M.markAttendance(v0, s0.id, '2026-11-02', 'absent');
+    M.markAttendance(v0, s0.id, '2026-11-03', 'absent');
+    M.addAdvance(v0, s0.id, { amount: 2000, date: '2026-11-05', recovery: 'full' });
+    const w0 = M.computeMonthPay(v0, s0.id, '2026-11');
+    check('Phase 2 acceptance (no paid leave): 15,000 − 3 absent − 2,000 advance = 11,500 net',
+      w0.freeDaysUsed === 0 && w0.chargedAbsentDays === 3 && w0.absentDeduction === 1500
+      && w0.netPkr === 11500, w0);
+    // Same rows, no advance: 15,000 − 500 = 14,500.
+    const vN = M.emptyVault();
+    const sN = M.addStaff(vN, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-01', leavePerMonth: 2 });
+    M.markAttendance(vN, sN.id, '2026-11-01', 'absent');
+    M.markAttendance(vN, sN.id, '2026-11-02', 'absent');
+    M.markAttendance(vN, sN.id, '2026-11-03', 'absent');
+    check('Phase 2 acceptance (paid leave, no advance): 15,000 − 3 absent (2 free) = 14,500 net',
+      M.computeMonthPay(vN, sN.id, '2026-11').netPkr === 14500);
     check('Phase 2: computeMonthPay rejects a bad month key',
       throwsCode(() => M.computeMonthPay(v, s.id, '2026-13'), 'VALIDATION'));
     check('Phase 2: computeMonthPay for an unknown helper fails (NOT_FOUND)',
       throwsCode(() => M.computeMonthPay(v, 'nope', '2026-11'), 'NOT_FOUND'));
-    // Half days + rounding: salary ÷ 60 rounds to the rupee, halves up.
+    // Half days + paid leave: 1 half (0.5 free days) + 1 absent (1 free
+    // day) use 1.5 of the 2 free days, so nothing deducts and 0.5 free
+    // days are left. The rounding itself is covered by the leave-0 twin.
     const vH = M.emptyVault();
     const h = M.addStaff(vH, { name: 'Bilal', role: 'driver', salaryPkr: 10000, joinedDate: '2026-11-01', leavePerMonth: 2 });
     M.markAttendance(vH, h.id, '2026-11-02', 'half');
     M.markAttendance(vH, h.id, '2026-11-03', 'absent');
     const wH = M.computeMonthPay(vH, h.id, '2026-11');
+    check('Phase 2 (paid leave): 1 half day with leave 2 costs nothing — 1.5 free days left',
+      wH.halfDays === 1 && wH.absentDays === 1 && wH.freeDaysUsed === 1.5 && wH.freeDaysLeft === 0.5
+      && wH.halfDeduction === 0 && wH.absentDeduction === 0 && wH.netPkr === 10000, wH);
+    const vH0 = M.emptyVault();
+    const h0 = M.addStaff(vH0, { name: 'Bilal', role: 'driver', salaryPkr: 10000, joinedDate: '2026-11-01', leavePerMonth: 0 });
+    M.markAttendance(vH0, h0.id, '2026-11-02', 'half');
+    M.markAttendance(vH0, h0.id, '2026-11-03', 'absent');
+    const wH0 = M.computeMonthPay(vH0, h0.id, '2026-11');
     check('Phase 2: half-day deduction is salary ÷ 60, rounded (10,000 ÷ 60 = 167)',
-      wH.halfDays === 1 && wH.halfDeduction === 167, wH);
+      wH0.halfDays === 1 && wH0.halfDeduction === 167, wH0);
     check('Phase 2: absent deduction is salary ÷ 30, rounded (10,000 ÷ 30 = 333)',
-      wH.absentDays === 1 && wH.absentDeduction === 333 && wH.netPkr === 10000 - 333 - 167, wH);
+      wH0.absentDays === 1 && wH0.absentDeduction === 333 && wH0.netPkr === 10000 - 333 - 167, wH0);
+  }
+  // Paid leave edges + mid-month proration (Hashir 2026-11-06):
+  // leave excuses the first N absent days; joiners are paid only from
+  // the join date. Each case is hand-computed below.
+  {
+    const mk = (salary, leave, joined) => {
+      const v = M.emptyVault();
+      const s = M.addStaff(v, { name: 'T', role: 'maid', salaryPkr: salary, joinedDate: joined, leavePerMonth: leave });
+      return { v, s };
+    };
+    const mark = (v, s, dates, what) => dates.forEach((d) => M.markAttendance(v, s.id, d, what));
+    // 1 absent day, leave 2: full salary, 1 free day left.
+    {
+      const { v, s } = mk(15000, 2, '2026-11-01');
+      mark(v, s, ['2026-11-05'], 'absent');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (paid leave): 1 absent day with leave 2 is free — full salary, 1 free day left',
+        w.netPkr === 15000 && w.freeDaysUsed === 1 && w.freeDaysLeft === 1
+        && w.chargedAbsentDays === 0 && w.absentDeduction === 0, w);
+    }
+    // 4 absent days, leave 2: 2 deduct.
+    {
+      const { v, s } = mk(15000, 2, '2026-11-01');
+      mark(v, s, ['2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04'], 'absent');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (paid leave): 4 absent days with leave 2 deduct 2 days — net 14,000',
+        w.freeDaysUsed === 2 && w.freeDaysLeft === 0 && w.chargedAbsentDays === 2
+        && w.absentDeduction === 1000 && w.netPkr === 14000, w);
+    }
+    // Consumption order: absent days use the free days first.
+    // Leave 1, 1 absent + 1 half: the absent day is free, the half day
+    // is charged (250). Leave 2, 2 absent + 2 half: both absent days
+    // are free, both half days are charged (500).
+    {
+      const { v, s } = mk(15000, 1, '2026-11-01');
+      mark(v, s, ['2026-11-01'], 'absent');
+      mark(v, s, ['2026-11-02'], 'half');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (paid leave): leave 1, 1 absent + 1 half — absent free, half charged Rs 250',
+        w.freeDaysUsed === 1 && w.chargedAbsentDays === 0 && w.chargedHalfDays === 1
+        && w.halfDeduction === 250 && w.netPkr === 14750, w);
+    }
+    {
+      const { v, s } = mk(15000, 2, '2026-11-01');
+      mark(v, s, ['2026-11-01', '2026-11-02'], 'absent');
+      mark(v, s, ['2026-11-03', '2026-11-04'], 'half');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (paid leave): leave 2, 2 absent + 2 half — absents free, halves charged Rs 500',
+        w.freeDaysUsed === 2 && w.chargedAbsentDays === 0 && w.chargedHalfDays === 2
+        && w.halfDeduction === 500 && w.netPkr === 14500, w);
+    }
+    // Proration: joined 16 Nov (30-day month) -> 15 days x 500 = 7,500.
+    {
+      const { v, s } = mk(15000, 2, '2026-11-16');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (proration): joined 16 Nov, Rs 15,000 — 15 days = Rs 7,500',
+        w.isProrated === true && w.proratedDays === 15 && w.salaryPkr === 7500 && w.netPkr === 7500, w);
+      const stmt = M.staffPayStatement(s, '2026-11');
+      check('Phase 2 (proration): statement shows the prorated salary line',
+        stmt.includes('Salary (joined 2026-11-16, 15 days): Rs 7,500')
+        && stmt.includes('Net payable: Rs 7,500 - Rs 0 - Rs 0 - Rs 0 = Rs 7,500'), stmt);
+    }
+    // Joined on the 1st: the full salary, not prorated.
+    {
+      const { v, s } = mk(15000, 2, '2026-11-01');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (proration): joined 1 Nov — full salary, not prorated',
+        w.isProrated === false && w.proratedDays === 30 && w.salaryPkr === 15000 && w.netPkr === 15000, w);
+    }
+    // Joined on the last day: one day's pay.
+    {
+      const { v, s } = mk(15000, 2, '2026-11-30');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (proration): joined 30 Nov — one day = Rs 500',
+        w.isProrated === true && w.proratedDays === 1 && w.salaryPkr === 500 && w.netPkr === 500, w);
+    }
+    // A 31-day month counts to the 31st; joining on the 1st still pays
+    // the full salary (never more than the monthly salary).
+    {
+      const { v, s } = mk(15000, 2, '2026-10-16');
+      const w = M.computeMonthPay(v, s.id, '2026-10');
+      check('Phase 2 (proration): joined 16 Oct (31-day month) — 16 days = Rs 8,000',
+        w.proratedDays === 16 && w.salaryPkr === 8000 && w.netPkr === 8000, w);
+    }
+    {
+      const { v, s } = mk(15000, 2, '2026-10-01');
+      const w = M.computeMonthPay(v, s.id, '2026-10');
+      check('Phase 2 (proration): joined 1 Oct (31-day month) — full salary, capped at 30 days',
+        w.isProrated === false && w.proratedDays === 30 && w.salaryPkr === 15000, w);
+    }
+    {
+      const { v, s } = mk(15000, 2, '2026-10-31');
+      const w = M.computeMonthPay(v, s.id, '2026-10');
+      check('Phase 2 (proration): joined 31 Oct — one day = Rs 500',
+        w.proratedDays === 1 && w.salaryPkr === 500, w);
+    }
+    // A joiner with absences deducts from the prorated salary.
+    {
+      const { v, s } = mk(15000, 2, '2026-11-16');
+      mark(v, s, ['2026-11-20', '2026-11-21'], 'absent');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (proration + leave): joined 16 Nov, 2 absent, leave 2 — both free, net Rs 7,500',
+        w.salaryPkr === 7500 && w.freeDaysUsed === 2 && w.netPkr === 7500, w);
+    }
+    {
+      const { v, s } = mk(15000, 2, '2026-11-16');
+      mark(v, s, ['2026-11-20', '2026-11-21', '2026-11-22'], 'absent');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (proration + leave): joined 16 Nov, 3 absent, leave 2 — 1 charged, net Rs 7,000',
+        w.salaryPkr === 7500 && w.chargedAbsentDays === 1 && w.absentDeduction === 500 && w.netPkr === 7000, w);
+    }
+    // A month before the join date pays nothing — the helper was not here.
+    {
+      const { v, s } = mk(15000, 2, '2026-12-01');
+      const w = M.computeMonthPay(v, s.id, '2026-11');
+      check('Phase 2 (proration): a month before the join date pays Rs 0',
+        w.proratedDays === 0 && w.salaryPkr === 0 && w.netPkr === 0, w);
+    }
+    // A working stored before these rules (no new fields) still reads:
+    // every absent day charged, no proration, no "undefined" anywhere.
+    check('Phase 2: a working stored under the old rules renders without undefined',
+      (() => {
+        const v = M.emptyVault();
+        const s = M.addStaff(v, { name: 'Old', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-01', leavePerMonth: 2 });
+        const oldWorking = { salaryPkr: 15000, absentDays: 2, halfDays: 0, absentDeduction: 1000, halfDeduction: 0, advanceRecovery: 0, netPkr: 14000, daysInMonth: 30 };
+        s.paidMonths.push({ month: '2026-11', working: oldWorking, netPkr: 14000, paidDate: '2026-11-30' });
+        const stmt = M.staffPayStatement(s, '2026-11');
+        return stmt.includes('Monthly salary: Rs 15,000')
+          && stmt.includes('Absent days: 2 x Rs 500 = Rs 1,000')
+          && stmt.includes('Net payable: Rs 15,000 - Rs 1,000 - Rs 0 - Rs 0 = Rs 14,000')
+          && !stmt.includes('undefined');
+      })());
   }
   // Instalments: exactly one instalment per month; the last month takes
   // only what is left.
@@ -726,13 +892,14 @@ async function main() {
       throwsCode(() => M.computeMonthPay(v, s.id, '2026-11'), 'LOCKED'));
     check('Phase 2: a paid month is locked — marking paid again refuses',
       throwsCode(() => M.markMonthPaid(v, s.id, '2026-11', '2026-11-30'), 'LOCKED'));
-    check('Phase 2: the stored paid working survives the lock',
-      M.findPaidStaffMonth(s, '2026-11').netPkr === 12500
+    check('Phase 2: the stored paid working survives the lock (paid leave: 1 absent free, net 13,000)',
+      M.findPaidStaffMonth(s, '2026-11').netPkr === 13000
       && M.isStaffMonthPaid(s, '2026-11') === true && M.isStaffMonthPaid(s, '2026-12') === false);
     check('Phase 2: a paid statement shows the stored working + paid date',
-      M.staffPayStatement(s, '2026-11').includes('Net payable: Rs 15,000 - Rs 500 - Rs 0 - Rs 2,000 = Rs 12,500')
+      M.staffPayStatement(s, '2026-11').includes('Net payable: Rs 15,000 - Rs 0 - Rs 0 - Rs 2,000 = Rs 13,000')
       && M.staffPayStatement(s, '2026-11').includes('Paid on 2026-11-30')
-      && M.staffPayStatement(s, '2026-11').includes('Absent days: 1 x Rs 500 = Rs 500'));
+      && M.staffPayStatement(s, '2026-11').includes('Paid leave used: 1 day — Rs 0')
+      && M.staffPayStatement(s, '2026-11').includes('Absent days: 0 x Rs 500 = Rs 0'));
     check('Phase 2: the next month is still open after a lock',
       M.computeMonthPay(v, s.id, '2026-12').netPkr === 15000
       && M.markAttendance(v, s.id, '2026-12-01', 'absent').mark === 'absent');
@@ -1502,22 +1669,22 @@ async function main() {
     await waitFor(() => el('adv-ok').textContent.includes('Advance recorded')
       && staffHtml().includes('Remaining advance: Rs 2,000')),
     staffHtml().slice(0, 300));
-  check('Phase 2 UI: the pay panel shows the acceptance working (net Rs 11,500)',
-    staffHtml().includes('Net payable') && staffHtml().includes('Rs 11,500')
-    && staffHtml().includes('Absent: 3 × Rs 500'));
+  check('Phase 2 UI: the pay panel shows the acceptance working (net Rs 12,500, paid leave)',
+    staffHtml().includes('Net payable') && staffHtml().includes('Rs 12,500')
+    && staffHtml().includes('Absent: 1 × Rs 500') && staffHtml().includes('Paid leave used: 2 days'));
   // Copy statement: the statement box shows the full working.
   el('staff-list').dispatch('click',
     { target: { dataset: { action: 'copy', helper: helperId }, parentElement: null } });
   await sleep(50);
   check('Phase 2 UI: Copy statement shows the WhatsApp text with the working lines',
-    el('staff-statement').textContent.includes('Net payable: Rs 15,000 - Rs 1,500 - Rs 0 - Rs 2,000 = Rs 11,500')
-    && el('staff-statement').textContent.includes('Absent days: 3 x Rs 500 = Rs 1,500'));
+    el('staff-statement').textContent.includes('Net payable: Rs 15,000 - Rs 500 - Rs 0 - Rs 2,000 = Rs 12,500')
+    && el('staff-statement').textContent.includes('Absent days: 1 x Rs 500 = Rs 500'));
   // Mark paid -> locked: the panel shows the stored working, taps refuse.
   el('staff-list').dispatch('click',
     { target: { dataset: { action: 'pay', helper: helperId }, parentElement: null } });
   check('Phase 2 UI: Mark paid locks the month and shows the stored working',
     await waitFor(() => staffHtml().includes('Paid on') && staffHtml().includes('locked and cannot be edited')
-      && staffHtml().includes('Rs 11,500')));
+      && staffHtml().includes('Rs 12,500')));
   tapAtt('2026-11-10');
   await sleep(50);
   check('Phase 2 UI: tapping attendance on a locked month is refused with an error',
@@ -1904,9 +2071,9 @@ async function main() {
   // ---- §10. Phase 5: Summary + CSV export + final review ----
   // A vault with known rows in every section, November 2026 vs October:
   // staff A Rs 15,000, 3 absent Nov, Rs 2,000 advance (full) -> paid Nov
-  // net Rs 11,500 (the acceptance example); staff A was also paid Oct
-  // (Rs 15,000, no deductions). Staff B Rs 20,000 unpaid; staff C
-  // Rs 10,000 with a Rs 3,000 instalment advance (Rs 1,000/month).
+  // net Rs 12,500 (the acceptance example with paid leave); staff A was
+  // also paid Oct (Rs 15,000, no deductions). Staff B Rs 20,000 unpaid;
+  // staff C Rs 10,000 with a Rs 3,000 instalment advance (Rs 1,000/month).
   // Doodhwala Nov: 28 days x 1 litre x Rs 220 = Rs 6,160, marked paid;
   // Oct: 10 days = Rs 2,200. Newspaper Nov: 5 days x Rs 100 = Rs 500.
   {
@@ -1954,8 +2121,8 @@ async function main() {
     check('Phase 5: summaryForMonth rejects a bad month key',
       throwsCode(() => M.summaryForMonth(v, '2026-13'), 'VALIDATION'));
     const s = M.summaryForMonth(v, '2026-11', '2026-11-06');
-    check('Phase 5: summary staff paid = Rs 11,500 (1 helper), unpaid working Rs 29,000 (2 helpers)',
-      s.staff.paidPkr === 11500 && s.staff.paidCount === 1
+    check('Phase 5: summary staff paid = Rs 12,500 (1 helper), unpaid working Rs 29,000 (2 helpers)',
+      s.staff.paidPkr === 12500 && s.staff.paidCount === 1
       && s.staff.unpaidWorkingPkr === 29000 && s.staff.unpaidCount === 2, s.staff);
     check('Phase 5: summary advances outstanding = Rs 3,000 (instalment advance, nothing recovered yet)',
       s.staff.advancesOutstandingPkr === 3000, s.staff);
@@ -1973,8 +2140,8 @@ async function main() {
       && s.documents.expiringThisMonth[0].type === 'passport', s.documents);
     check('Phase 5: summary medicines expiring this month 1, expired 1, low stock 1',
       s.medicines.expiringCount === 1 && s.medicines.expiredCount === 1 && s.medicines.lowStockCount === 1, s.medicines);
-    check('Phase 5: compare staff paid delta Rs -3,500 vs Oct (Rs 15,000)',
-      s.compare.staffPaidDeltaPkr === -3500 && s.compare.staffPaidPrevPkr === 15000, s.compare);
+    check('Phase 5: compare staff paid delta Rs -2,500 vs Oct (Rs 15,000)',
+      s.compare.staffPaidDeltaPkr === -2500 && s.compare.staffPaidPrevPkr === 15000, s.compare);
     check('Phase 5: compare deliveries delta Rs 4,460 vs Oct (Rs 2,200)',
       s.compare.deliveriesDeltaPkr === 4460 && s.compare.deliveriesPrevPkr === 2200, s.compare);
     check('Phase 5: compare bills paid delta Rs 7,000 vs Oct (Rs 1,500)',
@@ -1993,8 +2160,8 @@ async function main() {
     check('Phase 5: staff CSV parses as readable CSV with the right rows + TOTAL',
       staffParsed.headers.includes('Net payable (Rs)') && staffParsed.rows.length === 4
       && staffParsed.rows[3]['Helper'] === 'TOTAL'
-      && Number(staffParsed.rows[3]['Net payable (Rs)']) === 40500, staffParsed.rows);
-    check('Phase 5: staff CSV TOTAL (Rs 40,500) = summary paid + unpaid working (11,500 + 29,000)',
+      && Number(staffParsed.rows[3]['Net payable (Rs)']) === 41500, staffParsed.rows);
+    check('Phase 5: staff CSV TOTAL (Rs 41,500) = summary paid + unpaid working (12,500 + 29,000)',
       Number(staffParsed.rows[3]['Net payable (Rs)']) === s.staff.paidPkr + s.staff.unpaidWorkingPkr);
     const delCsv = C.rowsToCsv(rows.deliveries.headers, rows.deliveries.rows);
     const delParsed = C.parseCsv(delCsv);
@@ -2019,7 +2186,7 @@ async function main() {
         return pass && Number(pass['Days until expiry']) === 20 && !docCsv.includes('data:image');
       })());
     check('Phase 5: CSV money is plain integers — no "Rs" and no thousands commas in amounts',
-      !staffCsv.includes('Rs ') && !staffCsv.includes('15,000') && !staffCsv.includes('11,500')
+      !staffCsv.includes('Rs ') && !staffCsv.includes('15,000') && !staffCsv.includes('12,500')
       && staffParsed.rows.every((r) => /^\d+$/.test(String(r['Net payable (Rs)']).trim())));
     check('Phase 5: csvEscape quotes commas and doubles quotes',
       C.csvEscape('a,b') === '"a,b"' && C.csvEscape('say "hi"') === '"say ""hi"""' && C.csvEscape('plain') === 'plain');
@@ -2065,7 +2232,7 @@ async function main() {
       V.BACKUP_APP_LABELS.includes('ghar-ka-register') && V.BACKUP_APP_LABELS.includes('personal-card-vault'));
   }
   // ---- §10b. Phase 5 UI wiring (Summary + CSV) in the fake DOM ----
-  // The shell vault already holds Ayesha (paid Nov, net Rs 11,500), the
+  // The shell vault already holds Ayesha (paid Nov, net Rs 12,500), the
   // doodhwala (Nov total Rs 220, paid) and a gas delivery with a refill.
   const phase5Ids = ['summary-month', 'summary-list', 'summary-empty',
     'csv-staff-btn', 'csv-deliveries-btn', 'csv-udhaar-btn', 'csv-bills-btn',
@@ -2080,8 +2247,8 @@ async function main() {
   ctx._dispatchWin('hashchange');
   el('summary-month').value = '2026-11';
   el('summary-month').dispatch('change');
-  check('Phase 5 UI: the Summary page shows the paid staff total (Rs 11,500) + deliveries (Rs 220) + last-month comparison',
-    el('summary-list').innerHTML.includes('Rs 11,500')
+  check('Phase 5 UI: the Summary page shows the paid staff total (Rs 12,500) + deliveries (Rs 220) + last-month comparison',
+    el('summary-list').innerHTML.includes('Rs 12,500')
     && el('summary-list').innerHTML.includes('Rs 220')
     && el('summary-list').innerHTML.includes('last month')
     && isHidden('summary-empty'), el('summary-list').innerHTML.slice(0, 300));
