@@ -1,1 +1,1 @@
-{"name":"personal-card-vault","private":true,"scripts":{"start":"node server.js","test":"node test.js"},"version":"1.0.0"}
+{"description":"Ghar ka Register — a free, open-source, local-first household book for a Pakistani home (staff pay, deliveries, udhaar, bills, documents, medicine), PIN-locked, nothing leaves the device.","name":"ghar-ka-register","private":true,"scripts":{"start":"node server.js","test":"node test.js"},"version":"2.0.0"}

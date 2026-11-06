@@ -1,142 +1,150 @@
-# Personal Card Vault — your cards, only yours
+# Ghar ka Register — your home's book, on this device only
 
-A local-first, private card/account wallet for Pakistan. Add bank accounts,
-debit/credit cards and wallets (HBL, Meezan, UBL, MCB, Allied, Bank Alfalah,
-Askari, Faysal, JS, Standard Chartered, NBP, BOP, SadaPay, NayaPay, Zindigi,
-Easypaisa, JazzCash, Payoneer, + Custom). Every card shows its details and
-balance, updated through every transaction, with an in-app notification feed.
+A free, open-source, local-first household book for a Pakistani home:
+staff pay and advances, daily deliveries (doodhwala, gas, water…),
+money lent and borrowed (udhaar), bill due dates, documents and their
+expiry, and the medicine cabinet — in one private, PIN-locked place,
+in English with Roman Urdu where it helps. Nothing ever leaves the
+device.
+
+This app replaced the Personal Card Vault in this repo (same repo,
+same link, replaced in place). The old vault code is gone from the
+codebase but stays in git history. **A v1 Card Vault is NOT migrated:**
+the first run of this app creates a fresh v2 vault. An old encrypted
+Card Vault backup does not open here — it restores only into the old
+code.
+
+## The three rules (binding, from the vault failure)
+
+- **R1 — nothing is ever "confirmed", "verified" or "real".** Every
+  record is shown "as you entered it"; every computed figure shows its
+  working. A wrong date is a wrong date — the app shows it, it does
+  not bless it.
+- **R2 — no live data of any kind.** No balances, no fetched bills, no
+  rates, no government records. Every number and date is typed by the
+  user and visible to the user.
+- **R3 — value in the first minute.** Add a helper → the month's pay
+  is worked out; add a document → the countdown shows.
+
+## What it does
+
+- **Today** — everything due, overdue and coming in the next 7 days
+  in one list: staff pay day, bill due, document expiring, medicine
+  expiring or running low, udhaar overdue. Each row says what it is,
+  the amount/date, and links to its page.
+- **Staff** — helpers (maid / cook / driver / guard / gardener /
+  caretaker / other), monthly salary, attendance (tap a day:
+  present → absent → half day; present is the default, only
+  exceptions are stored), advances (full recovery or instalments),
+  month-end pay worked out line by line
+  (salary − absent × (salary ÷ 30) − half × (salary ÷ 60) − advance
+  recovery = net payable), "Mark paid" locks the month, and a
+  plain-text pay statement ready to copy to WhatsApp. Example:
+  Rs 15,000 salary, 3 absent days, Rs 2,000 advance (full recovery)
+  pays Rs 15,000 − Rs 1,500 − Rs 2,000 = **Rs 11,500**. Paid leave
+  allowed is recorded on the helper but does not change the pay
+  working — every absent day is deducted. Pay is worked out on the
+  full monthly salary; a helper who joined mid-month is paid in full
+  unless absent days are marked.
+- **Deliveries** — doodhwala, newspaper, gas cylinder, water can,
+  ironing, other; daily log (usual quantity, 0 = skipped day), monthly
+  bill auto-summed from the log, "mark paid" per month, gas refill
+  date + price with days since the last refill. Example: 1 litre/day
+  × Rs 220 × 30 days with 2 skipped days = **Rs 6,160** (28 × 220).
+- **Udhaar** — people, lent/borrowed entries, partial repayments,
+  running balance per person and per entry, "settled" stamp at zero,
+  forgive (recorded as forgiven, never as a payment), and a polite
+  reminder text ready to copy to WhatsApp. For a lent entry the
+  reminder asks the person to pay when they can; for a borrowed entry
+  it promises to pay them back — the direction matters.
+- **Bills** — type, provider name, account/consumer number, amount,
+  due date, late-surcharge note — all typed by you, nothing fetched
+  from any provider. Due countdowns on Today; marking paid moves the
+  bill to history with the paid date.
+- **Documents** — CNIC, passport, driving licence, vehicle
+  registration/token, domicile, birth certificate, insurance,
+  warranty, other; issue + expiry dates, photo (JPEG/PNG, magic-byte
+  checked, downscaled to ≤ 500 KB, stored encrypted in the vault),
+  reminders at 30 / 14 / 7 / 1 days, renewal checklists for CNIC,
+  passport, driving licence and vehicle token only (other types show
+  "no checklist yet").
+- **Medicine** — name, quantity left, expiry, place, person, dose
+  schedule you typed; dose ticks lower the quantity by one; low-stock
+  warning at the number you set; expiry warnings at 30 and 7 days;
+  expired items stay red until you remove them ("do not use — check
+  with a pharmacist").
+- **Summary** — this month's totals per section (staff paid / still to
+  pay, deliveries total / paid, udhaar lent/borrowed outstanding,
+  bills paid / due / overdue, documents and medicines expiring) plus
+  this month vs last month for staff paid, deliveries and bills paid.
+  Every total is recomputed from the section rows when the page opens
+  — nothing is stored.
+- **Export** — CSV of every section (one file per section, or all six
+  in one file). Money is plain whole rupees, so the file opens as
+  readable CSV in a spreadsheet; totals reconcile with the section
+  pages to the rupee. Photos are never in a CSV. A CSV is plain text:
+  anyone who opens the file can read it. The encrypted backup is
+  separate (Backup & Import).
 
 ## Security — how it works
 
-- **Local-first:** all vault data lives ONLY in this browser (localStorage).
-  The server serves the app shell only and stores NOTHING. No account on a
-  server, no sync, no one else can see it — including us.
-- **Unlock:** a 6-digit PIN (plus an optional passphrase) set on first run.
-  PIN → PBKDF2 (600,000 iterations, SHA-256) → AES-256-GCM encrypts the
-  whole vault at rest. No PIN = no data, even if someone copies the files.
-- **Never stored:** full card numbers, CVV, card PIN, expiry, bank passwords.
-  Only the last 4 digits + provider + nickname + type + balance (the
-  balance is set only by the bank — never typed).
-- **Auto-lock** after 5 minutes without use (changeable to 1 or 15 minutes
-  in Security settings); hide-balances eye toggle; 5 wrong PINs → growing
+- **Local-first:** all data lives ONLY in this browser (localStorage).
+  The server serves the app shell only and stores NOTHING. No account
+  on a server, no sync, no one else can see it.
+- **Unlock:** a 6-digit PIN (plus an optional passphrase) set on first
+  run. PIN → PBKDF2 (600,000 iterations, SHA-256) → AES-256-GCM
+  encrypts the whole vault at rest. No PIN = no data, even if someone
+  copies the files.
+- **Auto-lock** after 5 minutes without use; 5 wrong PINs → growing
   lockout delay (30s, doubling, cap 15 min).
-- **Two-factor authentication (optional, in Security settings):** a 6-digit
-  code from your authenticator app (Google Authenticator, Authy, any TOTP
-  app — RFC 6238, HMAC-SHA1, 30-second step, ±1 step window) on top of the
-  PIN. The secret is generated in the app, enrolled by tapping the
-  `otpauth://` link or typing the manual key, and confirmed with one code
-  before 2FA turns on; the secret lives INSIDE the vault (protected by the
-  PIN). **10 one-time backup codes** are generated at setup (shown once —
-  write them down); each works once in place of the authenticator code and
-  is then burned. Only SHA-256 hashes of the codes are stored, outside the
-  vault, so they can be checked while the vault is locked. Disabling 2FA
-  needs the PIN + a current code. Security settings also offer change PIN,
-  change passphrase, auto-lock timeout, hide-balances, and regenerating
-  backup codes.
-- **No recovery, by design:** forgotten PIN = data unrecoverable. There is
-  no "forgot PIN" — that is the point of "up to me only".
-- **Encrypted backup:** export a backup file (restorable only with your PIN
-  + passphrase); import restores it.
+- **No recovery, by design:** forgotten PIN = data unrecoverable.
+  There is no "forgot PIN" — that is the point of "on this device
+  only". Export an encrypted backup and keep it somewhere safe.
+- **Encrypted backup:** export a backup file (restorable only with
+  your PIN + passphrase). Backups made by the earlier builds of this
+  app carry the old `personal-card-vault` label; backups made from
+  Phase 5 on carry `ghar-ka-register`. Both restore — the label is
+  metadata only. An old **Card Vault** backup still does not open
+  here.
 
-## Honest limits
+## Honest limits (printed in the app, not buried)
 
-- **No live bank sync.** No Pakistani bank or wallet offers a personal API
-  today, so balances cannot update themselves. They update when you add a
-  transaction, approve a pasted bank SMS, or import a statement CSV.
-- **The web app cannot read your phone's SMS.** Pasting a bank SMS is the
-  web equivalent: if the SMS names one of your saved accounts (provider +
-  last-4), Intelligence updates it directly with an Undo button; otherwise
-  the parser shows a review card and nothing is saved until you approve it.
-- **Open banking is not live.** SBP published draft Open Banking Regulations
-  on 30 Oct 2026 (comments due 30 Nov 2026). When it goes live, the Connect
-  Bank slot in the app is where it will appear — never faked as working.
-- Software encryption is only as secure as the device. On a rooted phone or
-  a shared unlocked device, someone with the app open can see plaintext.
+- Nothing is fetched, checked or looked up — every record is "as you
+  entered it". A wrong date is a wrong date; the book shows it, it
+  does not bless it.
+- No reminders when the app is closed (a local web app cannot push).
+  Open the app and Today tells you what is due.
+- No recovery if the PIN is forgotten (by design, as above).
+- Renewal checklists are dated static text — rules change; the app
+  says "check with the office". Fee figures in the checklists were
+  checked against the official pages on 2026-11-06: NADRA Smart NIC
+  renewal Rs 750 / 1,500 / 2,500 (nadra.gov.pk fee structure),
+  DGIP e-passport 36 pages / 5 years Rs 9,000 normal / 15,000 urgent
+  (dgip.gov.pk), Punjab DLIMS licence renewal motorcycle Rs 450 /
+  car Rs 1,350 + Rs 480 courier (dlims.punjab.gov.pk), Punjab Excise
+  token tax FY 2026-27 up to 1000cc Rs 20,000 once, 1001–2000cc 0.3%
+  and above 2000cc 0.4% of invoice price a year
+  (excise.punjab.gov.pk). Processing times and "how early you can
+  renew" are not printed as figures — the checklists say to ask the
+  office.
+- Medicine entries are a cabinet list, not medical advice; the app
+  never suggests a dose — it only records the schedule you typed.
+- Photos live inside the encrypted vault blob; a very large vault
+  slows the first open. The 500 KB downscale cap keeps it small.
+- The month start day on the Profile page is recorded for your
+  reference only: staff pay and delivery bills follow the calendar
+  month.
+- The app never reads SMS, never fetches anything, and has no
+  verification of any kind. The old vault's OCR files
+  (`public/ocr.js`, `public/vendor/`) stay on disk but are NOT loaded
+  in v1 — an optional "read the date off this photo" helper is a
+  later phase, with a review step.
 
-## How an account gets added
+## Not in v1 (closed list)
 
-1. **Manual add** — provider → type → nickname → last 4 digits → done.
-   There is NO balance field: **a balance is never typed** — not even at
-   creation. A new card starts with its balance unknown ("Balance not set
-   yet"). It is set only by your bank — paste a bank SMS (Intelligence) or
-   upload a statement (here, or in the monthly check).
-2. **Intelligence — paste a bank SMS, the wallet updates itself** — on the
-   Intelligence page, paste the transaction SMS (money cut OR received). The
-   parser reads the amount, direction, merchant, date, available balance
-   and the account identifier (last-4 + provider). If exactly one saved
-   account matches (provider + last-4), the balance updates DIRECTLY — no
-   amount entry, no account picking — and the result shows inline
-   ("JazzCash ••1234 updated: −Rs 2,500 → new balance Rs 47,500", plus a
-   cross-check against the bank's available balance and an Undo button).
-   If the card's balance was never set and the SMS states an available
-   balance, that number IS the balance now ("balance set from this SMS").
-   If the SMS states no available balance, the balance stays unknown and
-   the result says so plainly. If no account matches, or several do, it
-   falls back to the review card with the account picker — nothing is saved
-   until approved. Garbage, OTPs and amount-less messages change nothing.
-3. **CSV import** — upload a statement, map columns, duplicates flagged,
-   review every row, approve. Statement rows are bank data, so they set
-   balances from the statement.
-4. **Connect bank** — "coming when SBP open banking goes live" placeholder.
-
-## Verification — how a card earns trust
-
-A typed card is only a claim. The app marks every card with one status, in
-this order of strength:
-
-1. **✓ Screenshot verified** — a screenshot showing the total amount in
-   the account, read ON THIS DEVICE by the vendored OCR engine (the image
-   never leaves your phone or PC). Exactly one clear amount must be found;
-   otherwise nothing is set. NEVER by an SMS: a bank SMS can set the
-   balance, but it never verifies the card.
-2. **Statement matches** — a bank-statement PDF you uploaded, whose text
-   the app checked for the bank name, the last 4 digits, and your profile
-   name. This is the strongest proof the app can give today — and when a
-   statement matches, its balance (if the statement carries one clear
-   balance) becomes the card's balance too.
-3. **Statement attached — self-checked** — a screenshot you looked at
-   yourself next to the typed details and confirmed. This is labelled as
-   your check, not the app's. (A total-amount screenshot is different:
-   the app reads its amount itself — see rung 1.)
-4. **Statement attached** — a file kept as your record (unreadable text).
-5. **Not confirmed yet** — typed by hand, no proof. A fake card stays here.
-
-Old "Bank-confirmed" badges earned by an SMS under the old rule are
-stripped when the vault loads — those cards must be re-verified by a
-total-amount screenshot or a statement PDF. The balance itself is never
-touched by the strip.
-
-Rules that keep the data honest: no two cards with the same bank + last 4;
-**a balance is never typed — not even at creation.** It is set only by a
-bank SMS, a statement, or a total-amount screenshot (a forged statement
-or screenshot can still carry a false balance — only a bank SMS arriving
-from the bank is hard to fake). A saved card's balance can never be
-edited by hand — only a bank SMS, a statement, a total-amount screenshot,
-or a statement CSV can change it. You can rename a card, move it up or
-down, or delete it (two-tap confirm; deleting a card also removes its
-transactions). Old vaults keep their existing balances exactly as they
-are; new cards start with the balance unknown until a bank source sets
-it.
-
-**Intelligence screenshots:** when there is no time to paste an SMS, you
-can upload a screenshot of it instead. The app reads the text on the
-device and shows the same review card as pasting — nothing is saved
-until you approve it, and the amount is editable in case the read is
-wrong. An SMS screenshot updates the balance but never verifies a card.
-
-## Monthly check
-
-Once a month the home page reminds you to re-check every balance against
-the new statement and to export an encrypted backup. The monthly-check view
-lists every card with its status and last confirmed date. A lost phone with
-no backup means the vault is gone — there is no recovery by design.
-
-## Navigation (Phase 3)
-
-Sidebar, in order: Wallet (cards + summary only) → Add Card → Intelligence
-→ Security → Backup & Import → Profile (photo + details). Notifications
-are a bell in the sidebar, not a page. Your photo and name at the top of the
-sidebar and in the top bar open the Profile page.
+OCR date-reading helper, Mera Plot File, Student Kit, any live
+fetching, any push notification, multi-device sync, family sharing,
+any verification claim.
 
 ## Run
 
@@ -145,19 +153,8 @@ node server.js        # serves on :3036
 node test.js          # tests (must print ALL TESTS PASSED)
 ```
 
-Node 24+, zero dependencies. Design: Phase 2 (complete 2026-11-06) recreates
-the Code XR "Glassy Payment Checkout V2" reel for the wallet screens; Phase 3
-(complete 2026-11-06) reorganised it into a sidebar with one page per job,
-keeping the same glass look on every new page. The reel itself (warm
-frosted glass over a blurred warm interior photo, red-orange card, black pill
-buttons, green success accents, "Securing your payment" shimmer state, bottom
-stepper) — see `~/workspace/new-projects/p7-card-vault-research.md` and
-`~/workspace/p7-reel/`. Deviations from the reel, stated plainly: the card
-shows •••• last-4 + balance instead of a full number + expiry (the vault
-never stores full numbers, CVV or expiry); there is no countdown timer or
-cart (no checkout session); the stepper has 3 steps (Setup → Add card →
-Done) instead of 4; the "Paid" pill is "✓ Saved"; 2FA enrolment is an
-`otpauth://` tap-to-open link + manual key (no rendered QR image — a local
-QR encoder would need a bundled dependency, and the secret must never be
-sent to an external QR service); backup codes cannot be shown again (only
-their hashes are stored) — generate a new set to replace them.
+Node 24+, zero dependencies. Design: the Code XR "Glassy Payment
+Checkout V2" reel look (warm frosted glass over a blurred warm
+interior photo, black pill buttons, green success accents) carried
+over from the vault. Hosting is deferred until a container slot frees
+(4/4 full) — the app runs on a PC on port 3036 meanwhile.

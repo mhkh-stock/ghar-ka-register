@@ -1,8 +1,10 @@
-// Personal Card Vault — statement CSV import (browser + Node tests).
+// Ghar ka Register — CSV import (statement files) + CSV export (Phase 5).
 // Pure functions. Upload a statement CSV -> map columns -> review every
 // row -> approve. Duplicates (same amount + date + merchant, already in the
 // vault or twice in the file) are flagged, never silently saved.
 // Amounts are whole rupees. Dates normalise to YYYY-MM-DD.
+// Export (Phase 5): rowsToCsv / buildCombinedCsv turn the section rows
+// from model.js sectionCsvRows() into downloadable CSV text.
 'use strict';
 
 const DIRECTION_WORDS = {
@@ -148,9 +150,47 @@ function markDuplicates(vault, drafts) {
   });
 }
 
+// ---- CSV export (Phase 5: Summary + export) ----
+// The import half above reads statement CSVs. The export half writes the
+// book out: one CSV per section, or one combined file. Money is plain
+// integers (no "Rs", no thousands commas) so the file opens as readable
+// CSV in a spreadsheet. A field with a comma, a quote or a line break is
+// quoted; a quote inside a field is doubled. Nothing is fetched or
+// looked up — the rows come from the vault, as entered.
+function csvEscape(value) {
+  const s = value == null ? '' : String(value);
+  if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+  return s;
+}
+function rowsToCsv(headers, rows) {
+  const lines = [];
+  lines.push(headers.map(csvEscape).join(','));
+  for (const row of (rows || [])) lines.push(row.map(csvEscape).join(','));
+  return lines.join('\r\n') + '\r\n';
+}
+// One combined file: each section under its own heading line, so the
+// sections stay readable in one download.
+function buildCombinedCsv(sections) {
+  const order = ['staff', 'deliveries', 'udhaar', 'bills', 'documents', 'medicines'];
+  const titles = {
+    staff: 'Staff', deliveries: 'Deliveries', udhaar: 'Udhaar',
+    bills: 'Bills', documents: 'Documents', medicines: 'Medicines',
+  };
+  const parts = [];
+  for (const key of order) {
+    const sec = sections[key];
+    if (!sec) continue;
+    parts.push(titles[key]);
+    parts.push(rowsToCsv(sec.headers, sec.rows).replace(/\r\n$/, ''));
+    parts.push('');
+  }
+  return parts.join('\r\n');
+}
+
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { parseCsv, guessMapping, parseAmountCell, parseDateCell, directionFromCell, rowsToTransactions, markDuplicates, dupKey };
+  module.exports = { parseCsv, guessMapping, parseAmountCell, parseDateCell, directionFromCell, rowsToTransactions, markDuplicates, dupKey, csvEscape, rowsToCsv, buildCombinedCsv };
 }
 if (typeof window !== 'undefined') {
   window.CsvImport = { parseCsv, guessMapping, parseAmountCell, parseDateCell, directionFromCell, rowsToTransactions, markDuplicates, dupKey };
+  window.CsvExport = { csvEscape, rowsToCsv, buildCombinedCsv };
 }

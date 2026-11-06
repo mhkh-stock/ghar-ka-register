@@ -188,12 +188,17 @@ function createBackup(envelope) {
     throw fail('CORRUPT_VAULT', 'Nothing to back up.');
   }
   return {
-    app: 'personal-card-vault',
+    app: 'ghar-ka-register',
     backupVersion: 1,
     exportedAt: new Date().toISOString(),
     envelope,
   };
 }
+// Backups made by the Phase 1–4 builds carry app 'personal-card-vault';
+// backups made from Phase 5 on carry 'ghar-ka-register'. Both restore:
+// the label is metadata only, the envelope (and the PIN that opens it)
+// is what matters. Anything else is not a vault backup.
+const BACKUP_APP_LABELS = ['ghar-ka-register', 'personal-card-vault'];
 function parseBackup(text) {
   let obj;
   try {
@@ -201,7 +206,7 @@ function parseBackup(text) {
   } catch (_e) {
     throw fail('BAD_BACKUP', 'That file is not a vault backup.');
   }
-  if (!obj || obj.app !== 'personal-card-vault' || obj.backupVersion !== 1 || !obj.envelope) {
+  if (!obj || BACKUP_APP_LABELS.indexOf(obj.app) < 0 || obj.backupVersion !== 1 || !obj.envelope) {
     throw fail('BAD_BACKUP', 'That file is not a vault backup.');
   }
   const env = obj.envelope;
@@ -218,7 +223,7 @@ if (typeof module !== 'undefined' && module.exports) {
     validPin, validPassphrase, randomBytes, bytesToB64, b64ToBytes,
     deriveKey, encryptVault, decryptVault, saltFromEnvelope,
     createVault, unlockVault, saveVault,
-    createBackup, parseBackup,
+    createBackup, parseBackup, BACKUP_APP_LABELS, BACKUP_APP_LABELS,
     lockoutDelayMs, createLockoutState, isLocked, lockoutRemainingMs,
     recordFailure, recordSuccess, isIdleLocked,
   };

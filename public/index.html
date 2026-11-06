@@ -3,41 +3,42 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Personal Card Vault — your cards, only yours</title>
+<title>Ghar ka Register — your home's book, on this device only</title>
 <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
 <header class="topbar">
-  <div class="brand"><span class="logo">V</span><h1>Personal Card Vault</h1></div>
-  <span class="centre-pill">🔒 Card details are encrypted end-to-end…</span>
-  <a class="profile-chip" href="#/profile" aria-label="Open your profile"><span id="topbar-dp-initials" class="dp-initials small">V</span><img id="topbar-dp" class="dp-img small hidden" alt="Your photo"><span id="topbar-name">My Vault</span></a>
+  <div class="brand"><span class="logo">V</span><h1>Ghar ka Register</h1></div>
+  <span class="centre-pill">Your home's book — on this device only</span>
   <span id="lock-pill" class="lock-pill locked">Locked</span>
 </header>
 <main>
-  <!-- STEP 1: first run — set the PIN that locks the vault -->
+  <!-- STEP 1: first run — set the PIN that locks the book -->
   <section id="setup-screen" class="card hidden">
-    <h2>Set up your vault</h2>
-    <p class="muted">Your vault lives <strong>only on this device</strong>. The server stores
-      nothing — not your PIN, not your cards, not your balances. Everything is
-      locked with your PIN (and an optional passphrase) before it is saved.</p>
+    <h2>Set up your home's book</h2>
+    <p class="muted">Your book lives <strong>only on this device</strong>. The server stores
+      nothing — not your PIN, not your entries. Everything is locked with
+      your PIN (and an optional passphrase) before it is saved.</p>
     <div class="warn"><strong>No recovery, by design.</strong> If you forget your PIN (and
-      passphrase, if you set one), the vault cannot be opened by anyone — not even
+      passphrase, if you set one), the book cannot be opened by anyone — not even
       us. There is no "forgot PIN". Write your PIN down somewhere safe, or export
-      an encrypted backup (Settings) after setup.</div>
+      an encrypted backup (Backup &amp; Import) after setup.</div>
+    <p class="muted">A fresh book starts empty. An old Card Vault backup does not open
+      here — it restores only into the old code. Nothing is carried over.</p>
     <label for="setup-pin">6-digit PIN</label>
     <input id="setup-pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6" placeholder="e.g. 482917">
     <label for="setup-pin2">Confirm PIN</label>
     <input id="setup-pin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6" placeholder="type the PIN again">
     <label for="setup-pass">Optional passphrase (extra lock — at least 4 characters)</label>
     <input id="setup-pass" type="password" autocomplete="new-password" placeholder="leave empty if you don't want one">
-    <button id="setup-btn">Create my vault</button>
+    <button id="setup-btn">Create my book</button>
     <div id="setup-error" class="error"></div>
   </section>
 
   <!-- STEP 1: unlock -->
   <section id="unlock-screen" class="card hidden">
-    <h2>Unlock your vault</h2>
-    <p class="muted">Enter your PIN to open the vault on this device.</p>
+    <h2>Unlock your book</h2>
+    <p class="muted">Enter your PIN to open the book on this device.</p>
     <label for="unlock-pin">6-digit PIN</label>
     <input id="unlock-pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="6" placeholder="••••••">
     <label for="unlock-pass">Passphrase (only if you set one)</label>
@@ -45,243 +46,417 @@
     <button id="unlock-btn">Unlock</button>
     <div id="unlock-error" class="error"></div>
     <div id="lockout-note" class="warn hidden"></div>
-    <p class="muted">5 wrong PINs lock the vault for a growing delay (30s, then doubling,
-      up to 15 minutes). The vault locks itself after 5 minutes without use.</p>
+    <p class="muted">5 wrong PINs lock the book for a growing delay (30s, then doubling,
+      up to 15 minutes). The book locks itself after 5 minutes without use.</p>
   </section>
 
-  <!-- STEP 1b: second factor (only when 2FA is on) -->
-  <section id="totp-screen" class="card hidden">
-    <h2>Second step — authenticator code</h2>
-    <p class="muted">Two-factor is on. Open your authenticator app (Google Authenticator,
-      Authy, or any TOTP app) and enter the 6-digit code. You can also use one
-      of your backup codes instead.</p>
-    <label for="totp-code">6-digit code</label>
-    <input id="totp-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••">
-    <button id="totp-btn">Verify &amp; open vault</button>
-    <div id="totp-error" class="error"></div>
-    <p class="muted">Wrong codes count toward the lockout, the same as wrong PINs.</p>
-  </section>
-
-  <!-- Vault home (Phase 3: sidebar + one page per job) -->
+  <!-- The book: sidebar + one page per job -->
   <section id="vault-screen" class="hidden">
     <div class="app-shell">
-      <aside id="sidebar" class="glass" aria-label="Vault navigation">
-        <a class="sidebar-profile" href="#/profile" aria-label="Open your profile">
-          <span id="sidebar-dp-initials" class="dp-initials">V</span>
-          <img id="sidebar-dp" class="dp-img hidden" alt="Your photo">
+      <aside id="sidebar" class="glass" aria-label="Book navigation">
+        <div class="sidebar-profile">
+          <span class="dp-initials">V</span>
           <div class="sidebar-name-wrap">
-            <span id="sidebar-name" class="sidebar-name">My Vault</span>
-            <span class="muted small">Personal Card Vault</span>
+            <span id="sidebar-name" class="sidebar-name">My Home</span>
+            <span class="muted small">Ghar ka Register</span>
           </div>
-        </a>
-        <nav id="sidebar-nav" aria-label="Vault pages">
-          <button class="nav-btn" id="nav-wallet" data-page="wallet">🏠 <span class="nav-label">Wallet</span></button>
-          <button class="nav-btn" id="nav-add" data-page="add">＋ <span class="nav-label">Add Card</span></button>
-          <button class="nav-btn" id="nav-intelligence" data-page="intelligence">✦ <span class="nav-label">Intelligence</span></button>
+        </div>
+        <nav id="sidebar-nav" aria-label="Book pages">
+          <button class="nav-btn" id="nav-home" data-page="home">🏠 <span class="nav-label">Today</span></button>
+          <button class="nav-btn" id="nav-staff" data-page="staff">🧹 <span class="nav-label">Staff</span></button>
+          <button class="nav-btn" id="nav-deliveries" data-page="deliveries">🥛 <span class="nav-label">Deliveries</span></button>
+          <button class="nav-btn" id="nav-udhaar" data-page="udhaar">🤝 <span class="nav-label">Udhaar</span></button>
+          <button class="nav-btn" id="nav-bills" data-page="bills">🧾 <span class="nav-label">Bills</span></button>
+          <button class="nav-btn" id="nav-documents" data-page="documents">📄 <span class="nav-label">Documents</span></button>
+          <button class="nav-btn" id="nav-medicine" data-page="medicine">💊 <span class="nav-label">Medicine</span></button>
+          <button class="nav-btn" id="nav-summary" data-page="summary">📊 <span class="nav-label">Summary</span></button>
           <button class="nav-btn" id="nav-security" data-page="security">🔒 <span class="nav-label">Security</span></button>
           <button class="nav-btn" id="nav-backup" data-page="backup">💾 <span class="nav-label">Backup &amp; Import</span></button>
           <button class="nav-btn" id="nav-profile" data-page="profile">👤 <span class="nav-label">Profile</span></button>
         </nav>
-        <button id="bell-btn" class="nav-btn bell-btn" aria-label="Notifications" aria-haspopup="true">🔔 <span class="nav-label">Notifications</span><span id="bell-badge" class="badge hidden">0</span></button>
+        <button id="lock-btn" class="nav-btn secondary">🔒 <span class="nav-label">Lock book</span></button>
       </aside>
 
       <div class="app-content">
-        <!-- WALLET — only "Your cards" + "Summary" (+ Recent activity, part of the summary) -->
-        <section class="page" id="page-wallet">
-          <!-- Monthly check reminder (Phase 4): a glass banner when the check
-               is due, a small muted line when it was done in the last 30 days. -->
-          <div id="monthly-banner" class="glass hidden">
-            <strong>Monthly check due</strong> — upload this month's statements to re-check your balances, and export a backup.
-            <button id="monthly-banner-btn">Open monthly check</button>
-          </div>
-          <p id="monthly-done-line" class="muted hidden">Monthly check done on <span id="monthly-done-date"></span><span id="monthly-done-skipped"></span></p>
-          <div class="wallet-grid">
-            <div class="card" id="accounts-card">
-              <div class="row">
-                <div>
-                  <h2 style="margin:0">Your cards</h2>
-                  <div class="muted">Total across all accounts: <strong id="total-balance">Rs 0</strong>
-                    <span id="total-unknown" class="muted"></span>
-                    <button id="hide-btn" class="small toggle-btn">Hide balances</button></div>
-                </div>
-                <div style="flex:0 0 auto"><button id="lock-btn" class="secondary">Lock vault</button></div>
-              </div>
-              <div id="accounts-list" class="carousel"></div>
-              <p id="accounts-empty" class="muted">No accounts yet. Tap “＋ Add card” to add your first card or account.</p>
-              <div class="badges"><span class="pill">PBKDF2 · AES-256-GCM</span> <span class="pill">Local only — no server</span></div>
-            </div>
-            <div class="wallet-side">
-              <div class="card" id="summary-card">
-                <h2>Summary</h2>
-                <div id="summary-list"></div>
-                <p id="summary-empty" class="muted">No accounts yet.</p>
-                <div class="sum-total"><span>Total</span><span id="summary-total">Rs 0</span></div>
-                <div id="summary-unknown" class="muted"></div>
-              </div>
-              <div class="card" id="txns-card">
-                <h2>Recent activity</h2>
-                <div id="txns-list"></div>
-                <p id="txns-empty" class="muted">No transactions yet.</p>
-              </div>
-            </div>
-          </div>
-          <!-- Rename a card (Phase 3.2, revised by Hashir's rule): the nickname
-               is the user's own label — the only thing a hand may change.
-               Provider and last-4 identify the card (read-only). There is
-               deliberately NO balance or type field here: a saved card's
-               data can only be changed by a bank SMS, never by typing. -->
-          <div class="card hidden" id="edit-account-card">
-            <h2>Rename card</h2>
-            <p class="muted">Only the nickname can be changed — it is your own label for the card. The balance and type can only change when your bank says so (a bank SMS, a statement import, or a matching statement).</p>
+        <!-- TODAY -->
+        <section class="page" id="page-home">
+          <div class="card">
             <div class="row">
-              <div><label>Provider</label><input id="edit-provider" type="text" readonly></div>
-              <div><label>Last 4 digits</label><input id="edit-last4" type="text" readonly></div>
+              <div>
+                <h2 style="margin:0">Today</h2>
+                <p class="muted" style="margin:4px 0 0">Everything due, overdue and coming in the next 7 days — as you entered it. Nothing here is fetched or checked anywhere.</p>
+              </div>
             </div>
-            <label for="edit-nick">Nickname</label>
-            <input id="edit-nick" type="text" maxlength="40">
-            <div class="row"><button id="edit-save-btn">Save name</button><button id="edit-cancel-btn" class="secondary">Cancel</button></div>
-            <div id="edit-account-error" class="error"></div>
-            <div id="edit-account-ok" class="ok"></div>
+            <div id="today-list"></div>
+            <p id="today-empty" class="muted">Nothing due — add your first helper, bill or document.</p>
           </div>
-          <button id="wallet-add-btn">＋ Add card</button>
-          <!-- Stepper lives on the Wallet page only, in the normal flow — it can never overlap a form -->
-          <div id="vault-stepper" class="stepper glass">
-            <span class="step done" id="step-setup"><span class="dot">✓</span>Set up</span>
-            <span class="sep">→</span>
-            <span class="step active" id="step-add"><span class="dot">2</span>Add card</span>
-            <span class="sep">→</span>
-            <span class="step" id="step-done"><span class="dot">3</span>Done</span>
+          <div class="card">
+            <h2>Honest limits</h2>
+            <p class="muted">Nothing is fetched, checked or looked up — every record is as you entered it. A wrong date is a wrong date; the book shows it, it does not bless it. There are no reminders when the app is closed — open the app and Today tells you what is due. If the PIN is forgotten, the book cannot be opened (by design). Export an encrypted backup from Backup &amp; Import, and keep it somewhere safe.</p>
           </div>
         </section>
 
-        <!-- ADD CARD -->
-        <section class="page hidden" id="page-add">
-          <a class="back-link" href="#/wallet">← Back to Wallet</a>
-          <div class="card" id="add-account-card">
-            <h2>Add an account</h2>
-            <label for="add-provider">Provider</label>
-            <select id="add-provider"></select>
-            <div class="row">
-              <div><label for="add-type">Type</label>
-                <select id="add-type">
-                  <option value="bank">Bank account</option>
-                  <option value="debit">Debit card</option>
-                  <option value="credit">Credit card</option>
-                  <option value="wallet">Wallet</option>
-                </select></div>
-              <div><label for="add-last4">Last 4 digits (only)</label>
-                <input id="add-last4" type="text" inputmode="numeric" maxlength="4" placeholder="e.g. 1234"></div>
-            </div>
-            <label for="add-nick">Nickname</label>
-            <input id="add-nick" type="text" maxlength="40" placeholder="e.g. HBL Salary, JazzCash daily">
-            <label for="add-proof">Proof — upload your bank statement (PDF or photo, optional)</label>
-            <input id="add-proof" type="file" accept=".pdf,image/*">
-            <div id="add-proof-status" class="muted"></div>
-            <div id="add-proof-preview" class="hidden">
-              <img id="add-proof-img" alt="Your uploaded statement">
-              <p class="muted">Check it against what you typed — provider, last 4 digits, and your profile name:</p>
-              <div id="add-proof-typed" class="muted"></div>
-              <button id="add-proof-selfcheck-btn" class="secondary" type="button">I checked — this matches</button>
-              <p class="muted">This photo is kept as your own record — the app doesn't read it. Check it yourself.</p>
-            </div>
-            <div id="add-proof-error" class="error"></div>
-            <label for="add-shot">Verify — upload a screenshot showing the total amount in the account (optional)</label>
-            <input id="add-shot" type="file" accept="image/*">
-            <div id="add-shot-status" class="muted"></div>
-            <div id="add-shot-error" class="error"></div>
-            <button id="add-account-btn">Add account</button>
-            <div id="add-account-error" class="error"></div>
-            <div id="add-account-ok" class="ok"></div>
-            <p class="muted" id="add-honest-note">You never type a balance. It is set only by your bank — paste a bank SMS or upload a statement. A screenshot showing the total amount works too, and it is read on this device — the image never leaves your phone or PC. We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan. A bank SMS can set the balance, but it never verifies the card — only a total-amount screenshot or a matching statement PDF does that. A statement is your own record of proof. It is checked only against the bank name, last 4 digits and your profile name — a forged statement or screenshot can still lie. Only a bank SMS arriving from the bank is hard to fake.</p>
+        <!-- STAFF -->
+        <section class="page hidden" id="page-staff">
+          <a class="back-link" href="#/home">← Back to Today</a>
+          <div class="card">
+            <h2>Staff — helpers</h2>
+            <p class="muted">Helpers, monthly salary, attendance, advances and month-end pay, worked out line by line. Every figure is as you entered it; every computed figure shows its working. Pay is worked out on the full monthly salary — a helper who joined mid-month is paid in full unless you mark absent days. Paid leave allowed is recorded on the helper but does not change the pay working: every absent day is deducted.</p>
+            <h3>Add a helper</h3>
+            <label for="staff-name">Name</label>
+            <input id="staff-name" type="text" maxlength="60" placeholder="e.g. Ayesha">
+            <label for="staff-role">Role</label>
+            <select id="staff-role">
+              <option value="maid">Maid</option>
+              <option value="cook">Cook</option>
+              <option value="driver">Driver</option>
+              <option value="guard">Guard</option>
+              <option value="gardener">Gardener</option>
+              <option value="caretaker">Caretaker</option>
+              <option value="other">Other</option>
+            </select>
+            <label for="staff-salary">Monthly salary (Rs)</label>
+            <input id="staff-salary" type="number" inputmode="numeric" min="1" placeholder="e.g. 15000">
+            <label for="staff-joined">Joined date</label>
+            <input id="staff-joined" type="date">
+            <label for="staff-leave">Paid leave allowed per month (days, default 2)</label>
+            <input id="staff-leave" type="number" inputmode="numeric" min="0" max="31" value="2">
+            <label for="staff-phone">Phone (optional, 03xx)</label>
+            <input id="staff-phone" type="tel" inputmode="tel" maxlength="20" placeholder="e.g. 03001234567">
+            <button id="staff-add-btn">Add helper</button>
+            <div id="staff-add-error" class="error"></div>
+            <div id="staff-add-ok" class="ok"></div>
           </div>
-
-          <div class="card" id="connect-card">
-            <h2>Connect a bank</h2>
-            <p><span class="pill amber">Coming — not live yet</span></p>
-            <p class="muted">Automatic bank connection needs open banking. The State Bank of Pakistan
-              published <strong>draft</strong> Open Banking Regulations on 30 Oct 2026
-              (comments open until 30 Nov 2026). No bank offers a live personal API yet,
-              so no connection is possible today — and this app will never ask for your
-              bank login or password. When open banking goes live, this is where the
-              connection will appear.</p>
+          <div class="card">
+            <h2>Helpers</h2>
+            <label for="staff-month">Month (attendance &amp; pay)</label>
+            <input id="staff-month" type="month">
+            <div id="staff-list"></div>
+            <p id="staff-empty" class="muted">No helpers yet.</p>
+            <div id="staff-statement" class="review hidden"></div>
+          </div>
+          <div class="card">
+            <h2>Record an advance</h2>
+            <p class="muted">Pick a helper, enter the advance, and choose how it comes back: all from the next pay, or a fixed amount each month until it is cleared. The remaining advance is always shown on the helper.</p>
+            <label for="adv-helper">Helper</label>
+            <select id="adv-helper"></select>
+            <label for="adv-amount">Advance amount (Rs)</label>
+            <input id="adv-amount" type="number" inputmode="numeric" min="1" placeholder="e.g. 2000">
+            <label for="adv-date">Date</label>
+            <input id="adv-date" type="date">
+            <label for="adv-note">Note (optional)</label>
+            <input id="adv-note" type="text" maxlength="120" placeholder="e.g. for medicine">
+            <label for="adv-recovery">How it comes back</label>
+            <select id="adv-recovery">
+              <option value="full">Full — all from the next pay</option>
+              <option value="instalments">Instalments — a fixed amount each month</option>
+            </select>
+            <label for="adv-instalment">Instalment per month (Rs) — only for instalments</label>
+            <input id="adv-instalment" type="number" inputmode="numeric" min="0" placeholder="e.g. 500">
+            <button id="adv-add-btn">Record advance</button>
+            <div id="adv-error" class="error"></div>
+            <div id="adv-ok" class="ok"></div>
           </div>
         </section>
 
-        <!-- INTELLIGENCE -->
-        <section class="page hidden" id="page-intelligence">
-          <a class="back-link" href="#/wallet">← Back to Wallet</a>
-          <div class="card" id="sms-card">
-            <h2>Intelligence <span class="pill green">auto-update</span></h2>
-            <p class="muted">Paste your bank SMS here — the wallet finds the account and updates
-              it itself. Works for money cut and money received. If it cannot tell
-              which account the SMS belongs to, it shows you a review card instead —
-              <strong>nothing is saved until you approve it.</strong></p>
-            <label for="sms-text">Paste your bank SMS here</label>
-            <textarea id="sms-text" rows="3" placeholder="Paste the SMS here…"></textarea>
-            <button id="sms-parse-btn">Update</button>
-            <span class="muted">or</span>
-            <button id="sms-shot-btn" type="button" class="secondary">Upload SMS screenshot</button>
-            <input id="sms-shot" type="file" accept="image/*" class="file-input-hidden">
-            <div id="sms-shot-status" class="muted"></div>
-            <div id="sms-error" class="error"></div>
-            <div id="intel-result" class="intel-result hidden"></div>
-            <div id="sms-review"></div>
+        <!-- DELIVERIES -->
+        <section class="page hidden" id="page-deliveries">
+          <a class="back-link" href="#/home">← Back to Today</a>
+          <div class="card">
+            <h2>Deliveries — Doodhwala, newspaper, gas, water, ironing</h2>
+            <p class="muted">Daily quantities, skipped days and the monthly bill, added up from the daily log. Every figure is as you entered it; every computed figure shows its working.</p>
+            <h3>Add a delivery</h3>
+            <label for="del-name">Name</label>
+            <input id="del-name" type="text" maxlength="60" placeholder="e.g. Doodhwala">
+            <label for="del-kind">Kind</label>
+            <select id="del-kind">
+              <option value="Doodhwala">Doodhwala</option>
+              <option value="Newspaper">Newspaper</option>
+              <option value="Gas cylinder">Gas cylinder</option>
+              <option value="Water can">Water can</option>
+              <option value="Ironing">Ironing</option>
+              <option value="other">Other</option>
+            </select>
+            <label for="del-unit">Unit</label>
+            <select id="del-unit">
+              <option value="litre">litre</option>
+              <option value="day">day</option>
+              <option value="cylinder">cylinder</option>
+              <option value="piece">piece</option>
+            </select>
+            <label for="del-rate">Rate per unit (Rs)</label>
+            <input id="del-rate" type="number" inputmode="numeric" min="1" placeholder="e.g. 220">
+            <label for="del-qty">Usual quantity per day</label>
+            <input id="del-qty" type="number" inputmode="decimal" min="0" placeholder="e.g. 1">
+            <button id="del-add-btn">Add delivery</button>
+            <div id="del-add-error" class="error"></div>
+            <div id="del-add-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h2>Deliveries</h2>
+            <label for="del-month">Month (daily log &amp; bill)</label>
+            <input id="del-month" type="month">
+            <div id="deliveries-list"></div>
+            <p id="deliveries-empty" class="muted">No deliveries yet.</p>
+          </div>
+          <div class="card">
+            <h2>Log a day</h2>
+            <p class="muted">Quantity delivered that day. Leave the usual quantity as it is, or enter 0 for a skipped day, or a bigger number for extra quantity.</p>
+            <label for="log-delivery">Delivery</label>
+            <select id="log-delivery"></select>
+            <label for="log-date">Date</label>
+            <input id="log-date" type="date">
+            <label for="log-qty">Quantity delivered (0 = skipped day)</label>
+            <input id="log-qty" type="number" inputmode="decimal" min="0" max="10000" placeholder="e.g. 1">
+            <button id="log-btn">Log this day</button>
+            <div id="log-error" class="error"></div>
+            <div id="log-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h2>Gas refill</h2>
+            <p class="muted">For a gas cylinder delivery: the refill date and the price you paid, as you entered it. The days since the last refill are shown on the delivery.</p>
+            <label for="refill-delivery">Delivery</label>
+            <select id="refill-delivery"></select>
+            <label for="refill-date">Refill date</label>
+            <input id="refill-date" type="date">
+            <label for="refill-price">Refill price (Rs)</label>
+            <input id="refill-price" type="number" inputmode="numeric" min="1" placeholder="e.g. 3000">
+            <button id="refill-btn">Record refill</button>
+            <div id="refill-error" class="error"></div>
+            <div id="refill-ok" class="ok"></div>
+          </div>
+        </section>
+
+        <!-- UDHAAR -->
+        <section class="page hidden" id="page-udhaar">
+          <a class="back-link" href="#/home">← Back to Today</a>
+          <div class="card">
+            <h2>Udhaar — lent &amp; borrowed</h2>
+            <p class="muted">Money lent and borrowed, per person, with partial repayments and a running balance. Every figure is as you entered it; every computed figure shows its working.</p>
+            <h3>Add a person</h3>
+            <label for="udh-person-name">Person's name</label>
+            <input id="udh-person-name" type="text" maxlength="60" placeholder="e.g. Ahmed">
+            <button id="udh-person-add-btn">Add person</button>
+            <div id="udh-person-error" class="error"></div>
+            <div id="udh-person-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h3>Add an udhaar entry</h3>
+            <label for="udh-entry-person">Person</label>
+            <select id="udh-entry-person"></select>
+            <label for="udh-entry-direction">Lent or borrowed</label>
+            <select id="udh-entry-direction">
+              <option value="lent">Lent — I gave the money</option>
+              <option value="borrowed">Borrowed — I took the money</option>
+            </select>
+            <label for="udh-entry-amount">Amount (Rs)</label>
+            <input id="udh-entry-amount" type="number" inputmode="numeric" min="1" placeholder="e.g. 20000">
+            <label for="udh-entry-date">Date</label>
+            <input id="udh-entry-date" type="date">
+            <label for="udh-entry-reason">Reason (optional, up to 120 characters)</label>
+            <input id="udh-entry-reason" type="text" maxlength="120" placeholder="e.g. shop rent">
+            <label for="udh-entry-due">Due date (optional)</label>
+            <input id="udh-entry-due" type="date">
+            <button id="udh-entry-add-btn">Add entry</button>
+            <div id="udh-entry-error" class="error"></div>
+            <div id="udh-entry-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h2>People &amp; entries</h2>
+            <div id="udhaar-list"></div>
+            <p id="udhaar-empty" class="muted">No udhaar entries yet.</p>
+            <div id="udh-reminder" class="review hidden"></div>
+          </div>
+          <div class="card">
+            <h2>Record a repayment</h2>
+            <p class="muted">A repayment lowers the running balance of one entry. Repayments are kept as a list — nothing is edited or deleted after it is recorded. A repayment bigger than what is still outstanding is refused.</p>
+            <label for="repay-person">Person</label>
+            <select id="repay-person"></select>
+            <label for="repay-entry">Entry</label>
+            <select id="repay-entry"></select>
+            <label for="repay-amount">Repayment amount (Rs)</label>
+            <input id="repay-amount" type="number" inputmode="numeric" min="1" placeholder="e.g. 5000">
+            <label for="repay-date">Date</label>
+            <input id="repay-date" type="date">
+            <button id="repay-add-btn">Record repayment</button>
+            <div id="repay-error" class="error"></div>
+            <div id="repay-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h2>Forgive an amount</h2>
+            <p class="muted">An amount you let go of is recorded as forgiven — never as a payment that never happened. It lowers the balance the same way a repayment does.</p>
+            <label for="forgive-person">Person</label>
+            <select id="forgive-person"></select>
+            <label for="forgive-entry">Entry</label>
+            <select id="forgive-entry"></select>
+            <label for="forgive-amount">Amount forgiven (Rs)</label>
+            <input id="forgive-amount" type="number" inputmode="numeric" min="1" placeholder="e.g. 2000">
+            <button id="forgive-add-btn">Record as forgiven</button>
+            <div id="forgive-error" class="error"></div>
+            <div id="forgive-ok" class="ok"></div>
+          </div>
+        </section>
+
+        <!-- BILLS -->
+        <section class="page hidden" id="page-bills">
+          <a class="back-link" href="#/home">← Back to Today</a>
+          <div class="card">
+            <h2>Bills — due dates, typed only</h2>
+            <p class="muted">Bill type, provider, account number, amount and due date — all typed by you. Nothing is fetched from any provider. Every figure is as you entered it.</p>
+            <h3>Add a bill</h3>
+            <label for="bill-type">Type</label>
+            <select id="bill-type">
+              <option value="electricity">Electricity</option>
+              <option value="gas">Gas</option>
+              <option value="water">Water</option>
+              <option value="internet">Internet</option>
+              <option value="mobile">Mobile</option>
+              <option value="rent">Rent</option>
+              <option value="school fee">School fee</option>
+              <option value="other">Other</option>
+            </select>
+            <label for="bill-provider">Provider name</label>
+            <input id="bill-provider" type="text" maxlength="60" placeholder="e.g. IESCO">
+            <label for="bill-account">Account / consumer number (typed only)</label>
+            <input id="bill-account" type="text" maxlength="40" placeholder="e.g. 1234567890">
+            <label for="bill-amount">Amount (Rs)</label>
+            <input id="bill-amount" type="number" inputmode="numeric" min="1" placeholder="e.g. 8500">
+            <label for="bill-due">Due date</label>
+            <input id="bill-due" type="date">
+            <label for="bill-surcharge">Late-surcharge note (optional — type what the bill says, e.g. "Rs 500 after due date")</label>
+            <input id="bill-surcharge" type="text" maxlength="120" placeholder="e.g. Rs 500 after due date">
+            <button id="bill-add-btn">Add bill</button>
+            <div id="bill-add-error" class="error"></div>
+            <div id="bill-add-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h2>Bills</h2>
+            <div id="bills-list"></div>
+            <p id="bills-empty" class="muted">No bills yet.</p>
+          </div>
+        </section>
+
+        <!-- DOCUMENTS -->
+        <section class="page hidden" id="page-documents">
+          <a class="back-link" href="#/home">← Back to Today</a>
+          <div class="card">
+            <h2>Documents — expiry &amp; photos</h2>
+            <p class="muted">CNIC, passport, licence, vehicle token and more — issue and expiry dates, a photo, and reminders before expiry. Nothing here is fetched or checked anywhere. Every record is as you entered it.</p>
+            <h3>Add a document</h3>
+            <label for="doc-type">Type</label>
+            <select id="doc-type">
+              <option value="CNIC">CNIC</option>
+              <option value="passport">Passport</option>
+              <option value="driving licence">Driving licence</option>
+              <option value="vehicle registration">Vehicle registration</option>
+              <option value="vehicle token">Vehicle token</option>
+              <option value="domicile">Domicile</option>
+              <option value="birth certificate">Birth certificate</option>
+              <option value="insurance">Insurance</option>
+              <option value="warranty">Warranty</option>
+              <option value="other">Other</option>
+            </select>
+            <label for="doc-owner">Whose document (owner)</label>
+            <input id="doc-owner" type="text" maxlength="60" placeholder="e.g. Abu">
+            <label for="doc-issue">Issue date (optional)</label>
+            <input id="doc-issue" type="date">
+            <label for="doc-expiry">Expiry date</label>
+            <input id="doc-expiry" type="date">
+            <label for="doc-photo">Photo (optional — JPEG or PNG; shrunk to 500 KB or less before saving)</label>
+            <input id="doc-photo" type="file" accept="image/jpeg,image/png">
+            <div class="row"><button type="button" id="doc-photo-clear-btn" class="small secondary">Remove photo</button></div>
+            <div id="doc-photo-note" class="muted small"></div>
+            <button id="doc-add-btn">Add document</button>
+            <div id="doc-add-error" class="error"></div>
+            <div id="doc-add-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h2>Documents</h2>
+            <div id="documents-list"></div>
+            <p id="documents-empty" class="muted">No documents yet.</p>
+          </div>
+        </section>
+
+        <!-- MEDICINE -->
+        <section class="page hidden" id="page-medicine">
+          <a class="back-link" href="#/home">← Back to Today</a>
+          <div class="card">
+            <h2>Medicine cabinet</h2>
+            <p class="muted">A cabinet list, not medical advice — the book never suggests a dose, it only records the schedule you typed. Every record is as you entered it.</p>
+            <h3>Add a medicine</h3>
+            <label for="med-name">Name</label>
+            <input id="med-name" type="text" maxlength="80" placeholder="e.g. Panadol">
+            <label for="med-qty">Quantity left</label>
+            <input id="med-qty" type="number" inputmode="numeric" min="0" placeholder="e.g. 10">
+            <label for="med-unit">Unit</label>
+            <input id="med-unit" type="text" maxlength="20" placeholder="e.g. tablets">
+            <label for="med-expiry">Expiry date</label>
+            <input id="med-expiry" type="date">
+            <label for="med-place">Place</label>
+            <select id="med-place">
+              <option value="">— no place set —</option>
+              <option value="fridge">Fridge</option>
+              <option value="cupboard">Cupboard</option>
+              <option value="first-aid box">First-aid box</option>
+              <option value="travel kit">Travel kit</option>
+            </select>
+            <label for="med-person">Whose medicine (optional)</label>
+            <input id="med-person" type="text" maxlength="60" placeholder="e.g. Ami">
+            <label for="med-doses">Doses per day (optional — the schedule you typed)</label>
+            <input id="med-doses" type="number" inputmode="numeric" min="0" max="24" placeholder="e.g. 3">
+            <label for="med-low">Low-stock number (optional — warn when the quantity reaches this)</label>
+            <input id="med-low" type="number" inputmode="numeric" min="0" placeholder="e.g. 5">
+            <button id="med-add-btn">Add medicine</button>
+            <div id="med-add-error" class="error"></div>
+            <div id="med-add-ok" class="ok"></div>
+          </div>
+          <div class="card">
+            <h2>Medicines</h2>
+            <div id="medicine-list"></div>
+            <p id="medicine-empty" class="muted">No medicines yet.</p>
+          </div>
+        </section>
+
+        <!-- SUMMARY -->
+        <section class="page hidden" id="page-summary">
+          <a class="back-link" href="#/home">← Back to Today</a>
+          <div class="card">
+            <h2>Summary</h2>
+            <p class="muted">This month's totals per section, and this month vs last month — every total recomputed from the entries on the section pages, never stored. Udhaar outstanding is a point-in-time figure (all open entries), not a monthly total. Every figure below shows its working.</p>
+            <label for="summary-month">Month</label>
+            <input id="summary-month" type="month">
+            <div id="summary-list"></div>
+            <p id="summary-empty" class="muted">Nothing to summarise yet — add a helper, a delivery, an udhaar entry, a bill, a document or a medicine first.</p>
+          </div>
+          <div class="card">
+            <h2>Export — CSV</h2>
+            <p class="muted">One file per section, or all six sections in one file. Money is plain whole rupees, so the file opens as readable CSV in a spreadsheet. Photos are never in a CSV — they stay inside the encrypted book. The totals in the files are the same rows the section pages show; they reconcile to the rupee.</p>
+            <div class="row">
+              <button type="button" id="csv-staff-btn">Staff CSV</button>
+              <button type="button" id="csv-deliveries-btn">Deliveries CSV</button>
+              <button type="button" id="csv-udhaar-btn">Udhaar CSV</button>
+              <button type="button" id="csv-bills-btn">Bills CSV</button>
+              <button type="button" id="csv-documents-btn">Documents CSV</button>
+              <button type="button" id="csv-medicines-btn">Medicines CSV</button>
+              <button type="button" id="csv-all-btn">All sections — one file</button>
+            </div>
+            <p class="muted">The encrypted backup is separate — export it from Backup &amp; Import. A CSV is plain text: anyone who opens the file can read it.</p>
+            <div id="summary-error" class="error"></div>
+            <div id="summary-ok" class="ok"></div>
           </div>
         </section>
 
         <!-- SECURITY -->
         <section class="page hidden" id="page-security">
-          <a class="back-link" href="#/wallet">← Back to Wallet</a>
+          <a class="back-link" href="#/home">← Back to Today</a>
           <div class="card" id="security-settings-card">
             <h2>Security settings</h2>
-            <div class="row">
-              <div><strong>Two-factor authentication</strong><div class="muted" id="2fa-status">Off — your vault opens with the PIN only.</div></div>
-              <div style="flex:0 0 auto"><button id="2fa-toggle-btn" class="secondary">Enable two-factor</button></div>
-            </div>
-            <div id="2fa-setup" class="hidden">
-              <p class="muted">Tap the link on your phone to open it in your authenticator app —
-                or type the key by hand. Then enter one code from the app to confirm.</p>
-              <div class="warn" id="2fa-secret-box">
-                <div>Manual key: <strong id="2fa-secret-text"></strong></div>
-                <div><a id="2fa-otpauth-link" href="#">Open in authenticator app</a> · <button id="2fa-copy-btn" class="small secondary">Copy key</button></div>
-              </div>
-              <div id="2fa-confirm-form">
-                <label for="2fa-confirm-code">Code from your authenticator app</label>
-                <input id="2fa-confirm-code" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
-                <button id="2fa-confirm-btn">Confirm &amp; turn on two-factor</button>
-                <div id="2fa-error" class="error"></div>
-              </div>
-              <div id="2fa-backup-box" class="hidden">
-                <p><strong>Your backup codes — shown once. Write them down.</strong>
-                  Each code works once, in place of the authenticator code (the PIN is
-                  still required). If you lose your phone and these codes, the vault
-                  cannot be opened.</p>
-                <div id="2fa-backup-codes" class="review"></div>
-              </div>
-            </div>
-            <div id="2fa-disable" class="hidden">
-              <p class="muted">Turning off two-factor needs your PIN and a current authenticator code.</p>
-              <label for="2fa-off-pin">Your PIN</label>
-              <input id="2fa-off-pin" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
-              <label for="2fa-off-code">Current authenticator code</label>
-              <input id="2fa-off-code" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
-              <button id="2fa-disable-btn" class="danger">Turn off two-factor</button>
-              <div id="2fa-disable-error" class="error"></div>
-            </div>
-            <hr>
-            <div class="row">
-              <div><label for="autolock-select">Auto-lock after</label>
-                <select id="autolock-select">
-                  <option value="1">1 minute</option>
-                  <option value="5" selected>5 minutes</option>
-                  <option value="15">15 minutes</option>
-                </select></div>
-              <div><label>Hide balances</label>
-                <button id="settings-hide-btn" class="small toggle-btn">Hide balances</button></div>
-            </div>
+            <p class="muted">The book opens with your PIN only. It locks itself after 5 minutes without use. 5 wrong PINs lock it for a growing delay (30s, then doubling, up to 15 minutes).</p>
             <h3>Change PIN</h3>
             <label for="change-pin-old">Current PIN</label>
             <input id="change-pin-old" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+            <label for="change-pin-pass">Current passphrase (only if you set one)</label>
+            <input id="change-pin-pass" type="password" autocomplete="current-password" placeholder="leave empty if you didn't set one">
             <label for="change-pin-new">New PIN (6 digits)</label>
             <input id="change-pin-new" type="password" inputmode="numeric" maxlength="6" placeholder="e.g. 482917">
             <label for="change-pin-new2">Confirm new PIN</label>
@@ -292,174 +467,67 @@
             <h3>Change passphrase</h3>
             <label for="change-pass-old">Current PIN</label>
             <input id="change-pass-old" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+            <label for="change-pass-pass">Current passphrase (only if you set one)</label>
+            <input id="change-pass-pass" type="password" autocomplete="current-password" placeholder="leave empty if you didn't set one">
             <label for="change-pass-new">New passphrase (at least 4 characters, empty = remove it)</label>
             <input id="change-pass-new" type="password" placeholder="leave empty to remove the passphrase">
             <button id="change-pass-btn">Change passphrase</button>
             <div id="change-pass-error" class="error"></div>
             <div id="change-pass-ok" class="ok"></div>
-            <h3>Backup codes</h3>
-            <p class="muted">Codes cannot be shown again — only their fingerprints are stored.
-              <span id="backup-count">No backup codes are stored.</span>
-              Generate a new set to replace them (the old set stops working).</p>
-            <label for="show-codes-pin">Your PIN</label>
-            <input id="show-codes-pin" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
-            <button id="show-codes-btn" class="secondary">Generate new backup codes</button>
-            <div id="show-codes-error" class="error"></div>
-            <div id="show-codes-box" class="hidden">
-              <p><strong>New backup codes — shown once. Write them down.</strong></p>
-              <div id="show-codes-list" class="review"></div>
-            </div>
           </div>
-
           <div class="card" id="security-card">
-            <h2>How your data is protected</h2>
-            <p class="muted">Local-first: everything lives only in this browser, encrypted with
-              PBKDF2 + AES-256-GCM under your PIN. The server stores nothing. The vault
-              never holds full card numbers, CVV, card PINs, expiry dates or bank
-              passwords — only the last 4 digits, the provider, a nickname and the
-              balance. A vault that cannot spend your money cannot be robbed.</p>
-            <p class="muted"><strong>Honest limit:</strong> software encryption is only as secure as
-              this device. On a rooted phone, or a shared device left unlocked, someone
-              with the app open can see the vault in plain text. Keep your device locked
-              and your PIN private.</p>
-            <p class="muted"><strong>Honest limit:</strong> no live bank sync — no Pakistani bank or
-              wallet offers a personal API today. Balances update when you add a
-              transaction, approve a pasted SMS, or import a statement.</p>
-            <p class="muted"><strong>Two-factor:</strong> turn it on in Security settings and
-              unlocking also needs a code from your authenticator app, plus 10
-              one-time backup codes for a lost phone. The secret lives inside the
-              vault (protected by your PIN); the backup codes are stored as
-              fingerprints only, so they cannot be shown again — generate a new
-              set to replace them.</p>
+            <h2>How your book is protected</h2>
+            <p class="muted">Local-first: everything lives only in this browser, encrypted with PBKDF2 + AES-256-GCM under your PIN. The server stores nothing.</p>
+            <p class="muted"><strong>Honest limit:</strong> software encryption is only as secure as this device. On a shared device left unlocked, someone with the app open can see the book in plain text. Keep your device locked and your PIN private.</p>
           </div>
         </section>
 
         <!-- BACKUP & IMPORT -->
         <section class="page hidden" id="page-backup">
-          <a class="back-link" href="#/wallet">← Back to Wallet</a>
+          <a class="back-link" href="#/home">← Back to Today</a>
           <div class="card" id="backup-card">
             <h2>Backup</h2>
-            <p class="muted">Export an encrypted backup file — it can only be restored with your PIN
-              (and passphrase, if you set one). Keep the file somewhere safe; the backup
-              never leaves this device unless you move it yourself.</p>
+            <p class="muted">Export an encrypted backup file — it can only be restored with your PIN (and passphrase, if you set one). Keep the file somewhere safe; the backup never leaves this device unless you move it yourself. An old Card Vault backup does not open here — it restores only into the old code.</p>
             <div class="row">
               <button id="export-btn">Export encrypted backup</button>
               <label for="import-file" style="margin:0">Import a backup
                 <input id="import-file" type="file" accept=".json,application/json">
               </label>
             </div>
-            <p class="muted"><a href="#/reconcile">Monthly check</a> — re-check your balances against this month's statements, and export a backup.</p>
+            <label for="import-pin">Backup PIN (the PIN of the book that made this backup)</label>
+            <input id="import-pin" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+            <label for="import-pass">Backup passphrase (only if that book had one)</label>
+            <input id="import-pass" type="password" autocomplete="current-password" placeholder="leave empty if it didn't have one">
+            <button id="import-btn">Restore backup</button>
             <div id="backup-error" class="error"></div>
             <div id="backup-ok" class="ok"></div>
-          </div>
-
-          <div class="card" id="csv-card">
-            <h2>Import a statement (CSV)</h2>
-            <p class="muted">Download your statement CSV from your bank or wallet app, then upload it.
-              Map the columns, review every row, approve the ones you want. Duplicates
-              (same amount + date + merchant) are flagged and skipped.</p>
-            <label for="csv-file">CSV file</label>
-            <input id="csv-file" type="file" accept=".csv,text/csv">
-            <div id="csv-mapping" class="hidden">
-              <div class="row">
-                <div><label for="csv-col-date">Date column</label><select id="csv-col-date"></select></div>
-                <div><label for="csv-col-amount">Amount column</label><select id="csv-col-amount"></select></div>
-                <div><label for="csv-col-merchant">Merchant column</label><select id="csv-col-merchant"></select></div>
-                <div><label for="csv-col-direction">Direction column</label><select id="csv-col-direction"></select></div>
-              </div>
-              <p class="muted">Direction values: "debit"/"dr"/"withdrawal"/"debit" = money out,
-                "credit"/"cr"/"deposit" = money in. If your CSV has no direction column,
-                pick "— none (amount sign)" and negative amounts count as debit.</p>
-              <label for="csv-account">Add these transactions to</label>
-              <select id="csv-account"></select>
-              <button id="csv-preview-btn">Preview rows</button>
-            </div>
-            <div id="csv-error" class="error"></div>
-            <div id="csv-review"></div>
           </div>
         </section>
 
         <!-- PROFILE -->
         <section class="page hidden" id="page-profile">
-          <a class="back-link" href="#/wallet">← Back to Wallet</a>
+          <a class="back-link" href="#/home">← Back to Today</a>
           <div class="card" id="profile-card">
-            <h2>Profile</h2>
-            <p class="muted">Your photo and details live <strong>inside the vault</strong> — encrypted
-              with everything else, only on this device. Nothing is uploaded anywhere.</p>
-            <div class="row">
-              <div style="flex:0 0 auto; text-align:center">
-                <span id="profile-dp-initials" class="dp-initials large">V</span>
-                <img id="profile-dp-preview" class="dp-img large hidden" alt="Your photo">
-              </div>
-              <div>
-                <label for="profile-dp-input">Your photo (DP)</label>
-                <input id="profile-dp-input" type="file" accept="image/*">
-                <p class="muted">Your photo is shrunk to 256px and stored inside the vault (100 KB max).
-                  Pick a photo, then tap Save profile.</p>
-              </div>
-            </div>
-            <label for="profile-name">Display name</label>
-            <input id="profile-name" type="text" maxlength="60" placeholder="e.g. Muhammad Hashir">
-            <label for="profile-phone">Phone (optional)</label>
-            <input id="profile-phone" type="tel" maxlength="20" placeholder="e.g. 0300 1234567">
-            <label for="profile-email">Email (optional)</label>
-            <input id="profile-email" type="email" maxlength="100" placeholder="e.g. you@example.com">
+            <h2>Profile — your household</h2>
+            <p class="muted">Your household name and month start day live <strong>inside the book</strong> — encrypted with everything else, only on this device. Nothing is uploaded anywhere. The month start day is recorded for your reference only: staff pay and delivery bills still follow the calendar month (1st to last day).</p>
+            <label for="profile-household">Household name</label>
+            <input id="profile-household" type="text" maxlength="60" placeholder="e.g. Hashir's home">
+            <label for="profile-monthstart">Month start day (1–28)</label>
+            <input id="profile-monthstart" type="number" min="1" max="28" placeholder="1">
             <button id="profile-save-btn">Save profile</button>
             <div id="profile-error" class="error"></div>
             <div id="profile-ok" class="ok"></div>
           </div>
         </section>
-
-        <!-- MONTHLY CHECK (Phase 4): reconcile + backup ritual. Reached from
-             the Wallet banner and the Backup page — NOT a sidebar button. -->
-        <section class="page hidden" id="page-reconcile">
-          <a class="back-link" href="#/wallet">← Back to Wallet</a>
-          <div class="card" id="reconcile-card">
-            <h2>Monthly check</h2>
-            <p class="muted">Re-check every card against this month's bank SMS or statement, then export a backup. A card counts as checked when a statement matched it — a bank SMS alone never counts (it can set the balance, but it never verifies the card) — or when you skip it on purpose (skips are shown plainly).</p>
-            <div id="reconcile-list"></div>
-            <p id="reconcile-empty" class="muted">No accounts yet — add a card first.</p>
-            <div id="reconcile-summary" class="muted"></div>
-            <div class="row">
-              <button id="reconcile-export-btn">Export encrypted backup</button>
-              <button id="reconcile-done-btn">Mark monthly check done</button>
-            </div>
-            <div id="reconcile-error" class="error"></div>
-            <div id="reconcile-ok" class="ok"></div>
-          </div>
-        </section>
       </div>
-    </div>
-
-    <!-- Notifications live behind the bell, not on a page -->
-    <div id="notif-panel" class="notif-panel glass hidden" role="dialog" aria-label="Notifications">
-      <div class="row">
-        <h2 style="margin:0">Notifications</h2>
-        <button id="bell-mark-read" class="small secondary">Mark all read</button>
-      </div>
-      <div id="bell-list"></div>
-      <p id="bell-empty" class="muted">No notifications yet. Every approved transaction appears here, plus low-balance alerts.</p>
     </div>
   </section>
 </main>
 
-<!-- Securing overlay (reel state 2 → 3): panels blur out, card floats centre -->
-<div id="securing-overlay" class="securing-overlay hidden">
-  <div id="securing-card-slot"></div>
-  <p id="securing-title" class="sec-title">Securing your payment</p>
-  <p id="securing-sub" class="sec-sub">Processing Secure Transaction… · Encrypting card details…</p>
-  <div class="sec-progress"><div id="securing-progress"></div></div>
-</div>
-
 <script src="/vault.js"></script>
 <script src="/model.js"></script>
-<script src="/sms.js"></script>
 <script src="/csv.js"></script>
-<script src="/cards.js"></script>
-<script src="/intel.js"></script>
 <script src="/proof.js"></script>
-<script src="/ocr.js"></script>
-<script src="/totp.js"></script>
 <script src="/nav.js"></script>
 <script src="/app.js"></script>
 </body>

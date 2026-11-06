@@ -1,4 +1,4 @@
-// Personal Card Vault — local-first private card/account wallet (Pakistan).
+// Ghar ka Register — local-first household book (Pakistan).
 // Node.js 24+, native node:http only. No external dependencies.
 // Port 3036. The server serves the app shell ONLY and stores NOTHING:
 // all vault data lives in the user's browser (localStorage), encrypted with
@@ -41,9 +41,12 @@ const server = http.createServer((req, res) => {
     return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true }));
   }
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) return serveFile(res, 'index.html');
-  if (req.method === 'GET' && (p === '/styles.css' || p === '/vault.js' || p === '/model.js' || p === '/sms.js' || p === '/csv.js' || p === '/cards.js' || p === '/intel.js' || p === '/proof.js' || p === '/totp.js' || p === '/nav.js' || p === '/ocr.js' || p === '/app.js' || p === '/bg.jpg' || p === '/favicon.ico')) {
+  if (req.method === 'GET' && (p === '/styles.css' || p === '/vault.js' || p === '/model.js' || p === '/csv.js' || p === '/proof.js' || p === '/nav.js' || p === '/ocr.js' || p === '/app.js' || p === '/bg.jpg' || p === '/favicon.ico')) {
     return serveFile(res, p.slice(1));
   }
+  // The old vault modules (sms.js, intel.js, totp.js, cards.js) were
+  // deleted in Phase 1 and are no longer listed here — they 404 by the
+  // fall-through below, like any unknown path.
   // OCR engine (Phase 3.6): vendored Tesseract files, served from this
   // same origin only. The language data is a plain .traineddata file
   // (no .gz) — Tesseract is told gzip: false.
@@ -57,5 +60,5 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, '0.0.0.0', () => {
-  console.log('Personal Card Vault listening on :' + PORT);
+  console.log('Ghar ka Register listening on :' + PORT);
 });
