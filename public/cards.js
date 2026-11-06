@@ -41,6 +41,26 @@ function esc(s) {
 }
 function fmtRs(n) { return 'Rs ' + Number(n || 0).toLocaleString('en-PK'); }
 
+// Status ladder (Phase 3.3, strongest first): a real bank SMS (Phase 3.1)
+// outranks everything; then an app-checked statement match; then a
+// screenshot the user checked by eye; then an attached statement the app
+// could not read; then a statement that does not mention this card; then
+// nothing at all. One badge, one label — the wording says "matches", never
+// "verified": a statement cannot prove a card is real.
+function confirmationBadge(account) {
+  if (account && account.confirmedBy && account.confirmedBy.source === 'bank-sms') {
+    return '<span class="pill green">✓ Bank-confirmed</span>';
+  }
+  const p = account && account.proof;
+  if (p) {
+    if (p.status === 'match') return '<span class="pill green">Statement matches</span>';
+    if (p.status === 'self-checked') return '<span class="pill">Statement attached — self-checked</span>';
+    if (p.status === 'mismatch') return '<span class="pill amber">Statement attached — doesn\'t match this card</span>';
+    return '<span class="pill">Statement attached</span>';
+  }
+  return '<span class="pill">Not confirmed yet</span>';
+}
+
 // The reel's red-orange VISA card, recoloured per provider. Shows only the
 // last 4 digits — never a full number. `opts.hideBalances` masks the amount;
 // `opts.selected` enlarges the card; `opts.success` turns it green.
@@ -60,12 +80,13 @@ function buildCardVisual(account, opts) {
     + '<div class="cv-num">' + esc(num) + '</div>'
     + '<div class="cv-bottom"><span class="cv-holder">' + esc(a.nickname || 'My card') + '</span>'
     + '<span class="cv-bal">' + esc(bal) + '</span></div>'
+    + '<div class="cv-confirmed">' + confirmationBadge(a) + '</div>'
     + '<div class="cv-tap">Tap to pay</div></div>';
 }
 
 if (typeof module !== 'undefined' && module.exports) {
-  module.exports = { PROVIDER_GRADIENTS, DEFAULT_GRADIENT, providerClass, providerGradient, buildCardVisual };
+  module.exports = { PROVIDER_GRADIENTS, DEFAULT_GRADIENT, providerClass, providerGradient, buildCardVisual, confirmationBadge };
 }
 if (typeof window !== 'undefined') {
-  window.Cards = { PROVIDER_GRADIENTS, DEFAULT_GRADIENT, providerClass, providerGradient, buildCardVisual };
+  window.Cards = { PROVIDER_GRADIENTS, DEFAULT_GRADIENT, providerClass, providerGradient, buildCardVisual, confirmationBadge };
 }

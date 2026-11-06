@@ -2,10 +2,12 @@
 // Pure hash routing + the sidebar button order (Phase 3). No DOM, no vault.
 'use strict';
 
-const PAGES = ['wallet', 'add', 'intelligence', 'security', 'backup', 'profile'];
+const PAGES = ['wallet', 'add', 'intelligence', 'security', 'backup', 'profile', 'reconcile'];
 
 // The sidebar buttons, in Hashir's exact order. The HTML sidebar must list
-// the labels in this same order (checked in test.js §9).
+// the labels in this same order (checked in test.js §9). The monthly check
+// (#/reconcile) is a page but NOT a sidebar button — it is reached from the
+// Wallet banner and the Backup page only.
 const NAV_ORDER = [
   { id: 'wallet', label: 'Wallet', hash: '#/wallet' },
   { id: 'add', label: 'Add Card', hash: '#/add' },

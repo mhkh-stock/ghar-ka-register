@@ -29,14 +29,21 @@ function fmtRs(n) { return 'Rs ' + Number(n || 0).toLocaleString('en-PK'); }
 // (kept so Undo can remove exactly that notification).
 function applyIntelUpdate(vault, draft, account) {
   const prevBalance = account.balance;
+  const wasConfirmed = VaultModel.isBankConfirmed(account);
   const txn = VaultModel.addTransaction(vault, {
     accountId: account.id, amount: draft.amount, direction: draft.direction,
     merchant: draft.merchant, date: draft.date, source: 'sms',
   });
   const before = vault.notifications.length;
   VaultModel.approveTransaction(vault, txn.id);
+  // Bank-confirmed (Phase 3.1): a real bank SMS matched this exact account —
+  // the only proof an app can have in Pakistan today. Sticky: Undo reverses
+  // the balance change only, never this confirmation — the bank SMS itself
+  // was real. Only this direct-match path confirms; the review fallback,
+  // manual entry and CSV import never call this function.
+  VaultModel.markAccountBankConfirmed(vault, account.id);
   const notif = vault.notifications[before] || null;
-  return { txn: txn, prevBalance: prevBalance, newBalance: account.balance, notifId: notif ? notif.id : null };
+  return { txn: txn, prevBalance: prevBalance, newBalance: account.balance, notifId: notif ? notif.id : null, confirmed: !wasConfirmed };
 }
 
 // Reverse a direct update: the approved transaction is deleted (the model

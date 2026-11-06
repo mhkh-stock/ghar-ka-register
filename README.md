@@ -57,7 +57,7 @@ balance, updated through every transaction, with an in-app notification feed.
 1. **Manual add** — provider → type → nickname → last 4 digits → starting
    balance → done.
 2. **Intelligence — paste a bank SMS, the wallet updates itself** — on the
-   home screen, paste the transaction SMS (money cut OR received). The
+   Intelligence page, paste the transaction SMS (money cut OR received). The
    parser reads the amount, direction, merchant, date, available balance
    and the account identifier (last-4 + provider). If exactly one saved
    account matches (provider + last-4), the balance updates DIRECTLY — no
@@ -71,6 +71,42 @@ balance, updated through every transaction, with an in-app notification feed.
    review every row, approve.
 4. **Connect bank** — "coming when SBP open banking goes live" placeholder.
 
+## Verification — how a card earns trust
+
+A typed card is only a claim. The app marks every card with one status, in
+this order of strength:
+
+1. **✓ Bank-confirmed** — only a real SMS from your bank (pasted in
+   Intelligence) can set this. It is the strongest proof the app has.
+2. **Statement matches** — a bank-statement PDF you uploaded, whose text
+   the app checked for the bank name, the last 4 digits, and your profile
+   name.
+3. **Statement attached — self-checked** — a screenshot you looked at
+   yourself next to the typed details and confirmed. The app cannot read
+   text from a screenshot; this is labelled as your check, not the app's.
+4. **Statement attached** — a file kept as your record (unreadable text).
+5. **Not confirmed yet** — typed by hand, no proof. A fake card stays here.
+
+Rules that keep the data honest: no two cards with the same bank + last 4;
+a debit/wallet/bank balance can never be negative; **a saved card's balance
+can never be edited by hand** — only a bank SMS, a statement, or a statement
+CSV can change it. You can rename a card, move it up or down, or delete it
+(two-tap confirm; deleting a card also removes its transactions).
+
+## Monthly check
+
+Once a month the home page reminds you to re-check every balance against
+the new statement and to export an encrypted backup. The monthly-check view
+lists every card with its status and last confirmed date. A lost phone with
+no backup means the vault is gone — there is no recovery by design.
+
+## Navigation (Phase 3)
+
+Sidebar, in order: Wallet (cards + summary only) → Add Card → Intelligence
+→ Security → Backup & Import → Profile (photo + details). Notifications
+are a bell in the sidebar, not a page. Your photo and name at the top of the
+sidebar and in the top bar open the Profile page.
+
 ## Run
 
 ```
@@ -79,7 +115,9 @@ node test.js          # tests (must print ALL TESTS PASSED)
 ```
 
 Node 24+, zero dependencies. Design: Phase 2 (complete 2026-11-06) recreates
-the Code XR "Glassy Payment Checkout V2" reel for the wallet screens (warm
+the Code XR "Glassy Payment Checkout V2" reel for the wallet screens; Phase 3
+(complete 2026-11-06) reorganised it into a sidebar with one page per job,
+keeping the same glass look on every new page. The reel itself (warm
 frosted glass over a blurred warm interior photo, red-orange card, black pill
 buttons, green success accents, "Securing your payment" shimmer state, bottom
 stepper) — see `~/workspace/new-projects/p7-card-vault-research.md` and

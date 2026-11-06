@@ -37,7 +37,7 @@ const server = http.createServer((req, res) => {
     return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true }));
   }
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) return serveFile(res, 'index.html');
-  if (req.method === 'GET' && (p === '/styles.css' || p === '/vault.js' || p === '/model.js' || p === '/sms.js' || p === '/csv.js' || p === '/cards.js' || p === '/intel.js' || p === '/totp.js' || p === '/nav.js' || p === '/app.js' || p === '/bg.jpg' || p === '/favicon.ico')) {
+  if (req.method === 'GET' && (p === '/styles.css' || p === '/vault.js' || p === '/model.js' || p === '/sms.js' || p === '/csv.js' || p === '/cards.js' || p === '/intel.js' || p === '/proof.js' || p === '/totp.js' || p === '/nav.js' || p === '/app.js' || p === '/bg.jpg' || p === '/favicon.ico')) {
     return serveFile(res, p.slice(1));
   }
   return send(res, 404, 'text/plain; charset=utf-8', 'Not found');
