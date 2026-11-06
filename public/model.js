@@ -65,11 +65,102 @@ function emptyVault() {
   return {
     v: 1, createdAt: new Date().toISOString(),
     accounts: [], transactions: [], notifications: [],
+    // profile: display name + optional contact + DP photo (data URL JPEG).
+    // The profile lives INSIDE the vault, so it is encrypted with everything
+    // else. Old vaults (Phase 1/2) have no profile key — migrateVault()
+    // fills an empty one so they load fine.
+    profile: { displayName: '', phone: '', email: '', dp: null },
     // twoFactor: null | { enabled: true, secret: base32 } — the TOTP secret
     // lives INSIDE the vault, so it is protected by the PIN. Backup-code
     // hashes live OUTSIDE the vault (localStorage) by design (see totp.js).
     settings: { lowBalanceThreshold: 5000, twoFactor: null, autoLockMinutes: 5 },
   };
+}
+
+// ---- Profile (Phase 3) ----
+const MAX_DP_BYTES = 100 * 1024; // ~100 KB for the stored DP photo
+function emptyProfile() {
+  return { displayName: '', phone: '', email: '', dp: null };
+}
+function validateProfile(input) {
+  const errors = [];
+  if (!input || typeof input !== 'object') return ['profile is required'];
+  const name = String(input.displayName || '').trim();
+  if (name.length > 60) errors.push('display name must be 60 characters or fewer');
+  const phone = String(input.phone || '').trim();
+  if (phone.length > 20) errors.push('phone must be 20 characters or fewer');
+  const email = String(input.email || '').trim();
+  if (email.length > 100) errors.push('email must be 100 characters or fewer');
+  else if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) errors.push('email does not look like an email address');
+  if (input.dp !== undefined && input.dp !== null && input.dp !== '') {
+    if (typeof input.dp !== 'string' || input.dp.indexOf('data:image/jpeg;base64,') !== 0) {
+      errors.push('profile photo must be a JPEG data URL');
+    } else if (dpByteLength(input.dp) > MAX_DP_BYTES) {
+      errors.push('profile photo must be 100 KB or smaller');
+    }
+  }
+  // The DP data URL itself is never scanned: base64 can hold digit runs
+  // that look like card numbers but are not. Only the text fields are scanned.
+  const hits = scanSensitive({ displayName: name, phone: phone, email: email });
+  if (hits.length) errors.push('profile details must not contain card or password data');
+  return errors;
+}
+function setProfile(vault, input) {
+  const errors = validateProfile(input);
+  if (errors.length) throw fail('VALIDATION', 'Profile is not valid.', errors);
+  const prev = (vault.profile && typeof vault.profile === 'object') ? vault.profile : emptyProfile();
+  vault.profile = {
+    displayName: String(input.displayName || '').trim(),
+    phone: String(input.phone || '').trim(),
+    email: String(input.email || '').trim(),
+    dp: input.dp !== undefined ? (input.dp || null) : (prev.dp || null),
+  };
+  return vault.profile;
+}
+// Fill in everything a Phase 1/2 vault is missing, so old saves load fine.
+function migrateVault(vault) {
+  if (!vault || typeof vault !== 'object') throw fail('VALIDATION', 'Vault is required.');
+  if (!vault.profile || typeof vault.profile !== 'object') vault.profile = emptyProfile();
+  else {
+    vault.profile.displayName = String(vault.profile.displayName || '');
+    vault.profile.phone = String(vault.profile.phone || '');
+    vault.profile.email = String(vault.profile.email || '');
+    if (vault.profile.dp === undefined) vault.profile.dp = null;
+  }
+  if (!vault.settings || typeof vault.settings !== 'object') vault.settings = {};
+  if (vault.settings.twoFactor === undefined) vault.settings.twoFactor = null;
+  if (vault.settings.autoLockMinutes === undefined) vault.settings.autoLockMinutes = 5;
+  if (vault.settings.lowBalanceThreshold === undefined) vault.settings.lowBalanceThreshold = 5000;
+  if (!Array.isArray(vault.accounts)) vault.accounts = [];
+  if (!Array.isArray(vault.transactions)) vault.transactions = [];
+  if (!Array.isArray(vault.notifications)) vault.notifications = [];
+  return vault;
+}
+// Notification read-state (Phase 3 bell). A notification without a `read`
+// key (a Phase 1/2 save) counts as unread.
+function unreadNotificationCount(vault) {
+  if (!vault || !Array.isArray(vault.notifications)) return 0;
+  return vault.notifications.filter(function (n) { return !n.read; }).length;
+}
+function markAllNotificationsRead(vault) {
+  if (!vault || !Array.isArray(vault.notifications)) return 0;
+  let marked = 0;
+  vault.notifications.forEach(function (n) { if (!n.read) { n.read = true; marked++; } });
+  return marked;
+}
+// DP downscale math (pure, so Node can test it): shrink so the longest side
+// is 256px, never upscale.
+function dpTargetSize(w, h) {
+  const MAX = 256;
+  const ww = Math.max(1, Math.floor(Number(w) || 0));
+  const hh = Math.max(1, Math.floor(Number(h) || 0));
+  if (ww <= MAX && hh <= MAX) return { width: ww, height: hh };
+  const s = Math.min(MAX / ww, MAX / hh);
+  return { width: Math.max(1, Math.round(ww * s)), height: Math.max(1, Math.round(hh * s)) };
+}
+function dpByteLength(dataUrl) {
+  const b64 = String(dataUrl || '').split(',')[1] || '';
+  return Math.floor(b64.length * 3 / 4);
 }
 
 // Two-factor (TOTP) state. The secret is validated as base32 here; the
@@ -177,7 +268,7 @@ function addTransaction(vault, input) {
 }
 
 function addNotification(vault, kind, text) {
-  const n = { id: newId(), kind, text: String(text), at: new Date().toISOString() };
+  const n = { id: newId(), kind, text: String(text), at: new Date().toISOString(), read: false };
   vault.notifications.push(n);
   return n;
 }
@@ -282,6 +373,9 @@ if (typeof module !== 'undefined' && module.exports) {
     validateTransaction, addTransaction, addNotification,
     approveTransaction, deleteTransaction, setLowBalanceThreshold,
     enableTwoFactor, disableTwoFactor, setAutoLockMinutes,
+    emptyProfile, validateProfile, setProfile, migrateVault,
+    unreadNotificationCount, markAllNotificationsRead,
+    dpTargetSize, dpByteLength, MAX_DP_BYTES,
     totals, reconcile, fmtBalance,
   };
 }
@@ -293,6 +387,9 @@ if (typeof window !== 'undefined') {
     validateTransaction, addTransaction, addNotification,
     approveTransaction, deleteTransaction, setLowBalanceThreshold,
     enableTwoFactor, disableTwoFactor, setAutoLockMinutes,
+    emptyProfile, validateProfile, setProfile, migrateVault,
+    unreadNotificationCount, markAllNotificationsRead,
+    dpTargetSize, dpByteLength, MAX_DP_BYTES,
     totals, reconcile, fmtBalance,
   };
 }
