@@ -101,6 +101,7 @@
                 <div>
                   <h2 style="margin:0">Your cards</h2>
                   <div class="muted">Total across all accounts: <strong id="total-balance">Rs 0</strong>
+                    <span id="total-unknown" class="muted"></span>
                     <button id="hide-btn" class="small toggle-btn">Hide balances</button></div>
                 </div>
                 <div style="flex:0 0 auto"><button id="lock-btn" class="secondary">Lock vault</button></div>
@@ -115,6 +116,7 @@
                 <div id="summary-list"></div>
                 <p id="summary-empty" class="muted">No accounts yet.</p>
                 <div class="sum-total"><span>Total</span><span id="summary-total">Rs 0</span></div>
+                <div id="summary-unknown" class="muted"></div>
               </div>
               <div class="card" id="txns-card">
                 <h2>Recent activity</h2>
@@ -172,8 +174,6 @@
             </div>
             <label for="add-nick">Nickname</label>
             <input id="add-nick" type="text" maxlength="40" placeholder="e.g. HBL Salary, JazzCash daily">
-            <label for="add-balance">Starting balance (PKR)</label>
-            <input id="add-balance" type="number" step="1" placeholder="e.g. 150000">
             <label for="add-proof">Proof — upload your bank statement (PDF or photo, optional)</label>
             <input id="add-proof" type="file" accept=".pdf,image/*">
             <div id="add-proof-status" class="muted"></div>
@@ -188,7 +188,7 @@
             <button id="add-account-btn">Add account</button>
             <div id="add-account-error" class="error"></div>
             <div id="add-account-ok" class="ok"></div>
-            <p class="muted" id="add-honest-note">We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan. An account becomes bank-confirmed when a real SMS from your bank updates it in Intelligence. A statement is your own record of proof. It is checked only against the bank name, last 4 digits and your profile name — it cannot prove a card is real. Only a real SMS from your bank does that. A screenshot's text can't be read by the app — for screenshots, you check the match yourself.</p>
+            <p class="muted" id="add-honest-note">You never type a balance. It is set only by your bank — paste a bank SMS or upload a statement. We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan. A bank SMS can set the balance, but it never verifies the card — only a matching statement PDF does that (a total-amount screenshot will too, when that check is built). A statement is your own record of proof. It is checked only against the bank name, last 4 digits and your profile name — it cannot prove a card is real. Only a matching statement does that. A screenshot's text can't be read by the app — for screenshots, you check the match yourself.</p>
           </div>
 
           <div class="card" id="connect-card">
@@ -408,7 +408,7 @@
           <a class="back-link" href="#/wallet">← Back to Wallet</a>
           <div class="card" id="reconcile-card">
             <h2>Monthly check</h2>
-            <p class="muted">Re-check every card against this month's bank SMS or statement, then export a backup. A card counts as checked when a real bank SMS confirmed it or a statement matched it — or when you skip it on purpose (skips are shown plainly).</p>
+            <p class="muted">Re-check every card against this month's bank SMS or statement, then export a backup. A card counts as checked when a statement matched it — a bank SMS alone never counts (it can set the balance, but it never verifies the card) — or when you skip it on purpose (skips are shown plainly).</p>
             <div id="reconcile-list"></div>
             <p id="reconcile-empty" class="muted">No accounts yet — add a card first.</p>
             <div id="reconcile-summary" class="muted"></div>

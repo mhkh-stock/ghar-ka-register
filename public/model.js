@@ -9,9 +9,16 @@
 // for a credit card that means a purchase makes the balance more negative
 // (you owe more) and a payment brings it back toward zero. Totals across
 // accounts are therefore the user's net position.
-// Every account also keeps `startingBalance` (set at creation, never
-// changed) so `reconcile()` can rebuild every balance from the approved
-// transactions and prove the books add up.
+// A balance is NEVER typed — not even at creation (Phase 3.5, Hashir's
+// rule 2026-11-06: a typed balance is how a made-up card fools people).
+// New accounts start with balance `null` (unknown) and startingBalance
+// `null`. A balance is set ONLY by a bank source — setBaselineFromBank()
+// from a bank SMS (Intelligence) or a statement — which also sets
+// startingBalance so reconcile() can rebuild every balance from the
+// approved transactions and prove the books add up. An account whose
+// baseline was never set stays unknown: totals skip it (never silently
+// as 0), reconcile cannot prove it, and the monthly check treats it as
+// not ready. Old vaults keep their numeric balances (their own history).
 //
 // NEVER stored, enforced by validation: full card numbers (13–19 digits),
 // CVV/CVC, card PIN, expiry, bank passwords. Only the last 4 digits.
@@ -140,6 +147,14 @@ function migrateVault(vault) {
   // Bank-confirmed (Phase 3.1): old accounts have no confirmedBy — they
   // were never proven by a bank SMS, so they load as "Not confirmed".
   vault.accounts.forEach(function (a) { if (a && a.confirmedBy === undefined) a.confirmedBy = null; });
+  // No typed balances (Phase 3.5): an old account without a balance field
+  // loads as unknown (null). Existing numeric balances stay exactly as
+  // they are — they are the user's own history.
+  vault.accounts.forEach(function (a) {
+    if (!a) return;
+    if (a.balance === undefined) a.balance = null;
+    if (a.startingBalance === undefined) a.startingBalance = null;
+  });
   // Statement proof (Phase 3.3): old accounts have no proof field.
   vault.accounts.forEach(function (a) { if (a && a.proof === undefined) a.proof = null; });
   // Monthly check (Phase 4): old vaults were never reconciled.
@@ -206,13 +221,12 @@ function validateAccount(input) {
   if (!nick) errors.push('nickname is required');
   if (nick.length > 40) errors.push('nickname must be 40 characters or fewer');
   if (!/^\d{4}$/.test(String(input.last4 || ''))) errors.push('last 4 digits must be exactly 4 digits');
-  const bal = Number(input.balance);
-  if (!Number.isFinite(bal)) errors.push('balance must be a number');
-  else if (Math.abs(bal) > MAX_MONEY) errors.push('balance is unreasonably large');
-  // Balance sign rule (Phase 3.1): a debit card, wallet or bank account
-  // holds money you HAVE, so it can never start negative. Only a credit
-  // card can — a negative balance is money you OWE the bank.
-  else if (input.type !== 'credit' && bal < 0) errors.push('balance cannot be negative for a ' + input.type + ' account (only a credit card can owe money)');
+  // No typed balances (Phase 3.5): a balance is set ONLY by a bank source
+  // (setBaselineFromBank), never typed — not even at creation. Supplying
+  // one is a caller mistake, so it is rejected, never silently ignored.
+  if (input.balance !== undefined && input.balance !== null) {
+    errors.push('balance is set by your bank, not typed — leave it blank');
+  }
   const hits = scanSensitive(input);
   if (hits.length) errors.push('never store full card numbers, CVV, PIN, expiry or passwords (found in: ' + hits.join(', ') + ')');
   return errors;
@@ -229,17 +243,20 @@ function createAccount(vault, input) {
     return a.provider === input.provider && String(a.last4) === String(input.last4);
   });
   if (dup) throw fail('VALIDATION', 'You already have a ' + input.provider + ' card ending ' + String(input.last4) + '.');
-  const balance = roundRs(Number(input.balance));
+  // No typed balance (Phase 3.5): a new account starts unknown (null).
+  // Only a bank source sets it — see setBaselineFromBank().
   const account = {
     id: newId(),
     provider: input.provider,
     type: input.type,
     nickname: String(input.nickname).trim(),
     last4: String(input.last4),
-    balance,
-    startingBalance: balance,
-    // Bank-confirmed (Phase 3.1): null until a real bank SMS updates this
-    // account in Intelligence. Manual add/edit and CSV import never set it.
+    balance: null,
+    startingBalance: null,
+    // Bank-confirmed: null until the card is verified — ONLY by a
+    // total-amount screenshot or a statement PDF (Hashir's rule,
+    // 2026-11-06). An SMS never sets this. Manual add/edit and CSV import
+    // never set it either.
     confirmedBy: null,
     // Statement proof (Phase 3.3): a record built by the UI from a validated
     // upload (see proof.js isValidProofRecord) — or null. The shape is
@@ -253,6 +270,38 @@ function createAccount(vault, input) {
 
 function findAccount(vault, accountId) {
   return vault.accounts.find((a) => a.id === accountId) || null;
+}
+
+// Is this account's balance known? `null` means unknown — never treat it
+// as 0. A wallet CAN hold a real Rs 0; null and 0 are different things.
+function isBalanceKnown(account) {
+  return !!account && typeof account.balance === 'number' && Number.isFinite(account.balance);
+}
+
+// Set an account's balance from a BANK source only (Phase 3.5): a bank SMS
+// (Intelligence) or a statement. `source` must be 'sms' or 'statement' —
+// anything else is rejected. The bank's number is the CURRENT balance, so
+// startingBalance is back-computed from it: startingBalance = balance −
+// (net effect of the already-approved transactions), which keeps
+// reconcile() true. The bank's number is trusted as stated — even a
+// negative one (an overdrawn account) — because it came from the bank.
+function setBaselineFromBank(vault, accountId, balance, source) {
+  const account = findAccount(vault, accountId);
+  if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
+  if (source !== 'sms' && source !== 'statement') {
+    throw fail('VALIDATION', 'A baseline can only come from a bank SMS or a statement.');
+  }
+  const b = Number(balance);
+  if (!Number.isFinite(b)) throw fail('VALIDATION', 'Baseline balance must be a number.');
+  if (Math.abs(b) > MAX_MONEY) throw fail('VALIDATION', 'Baseline balance is unreasonably large.');
+  let net = 0;
+  for (const t of (vault.transactions || [])) {
+    if (t.accountId !== accountId || t.status !== 'approved') continue;
+    net = roundRs(net + (t.direction === 'credit' ? t.amount : -t.amount));
+  }
+  account.startingBalance = roundRs(b - net);
+  account.balance = roundRs(b);
+  return account;
 }
 
 // Rename a card (Phase 3.2, revised by Hashir's rule 2026-11-06): the
@@ -332,14 +381,19 @@ function attachProof(vault, accountId, proof) {
 }
 
 // ---- Monthly check (Phase 4) ----
-// An account is "ready" for the monthly check when a bank SMS confirmed it
-// or a statement matched it. Anything else needs a re-check or an explicit
-// skip. A self-checked screenshot or an unreadable statement is NOT ready.
+// An account is "ready" for the monthly check when it was bank-confirmed
+// (an old record, or the future screenshot verification) or a statement
+// matched it — AND its balance is known. A verified card whose balance was
+// never set is not ready: the check cannot verify a number that does not
+// exist yet. An SMS alone never makes an account ready: it confirms
+// nothing (Hashir's rule, 2026-11-06).
 function accountCheckReady(account) {
-  return isBankConfirmed(account) || !!(account && account.proof && account.proof.status === 'match');
+  return isBalanceKnown(account)
+    && (isBankConfirmed(account) || !!(account && account.proof && account.proof.status === 'match'));
 }
-// The last date this account was confirmed (bank SMS date, else the
-// statement's upload date), or null when never confirmed.
+// The last date this account was confirmed (confirmation record date,
+// else the statement's upload date), or null when never confirmed. An SMS
+// alone never sets a date — it confirms nothing.
 function lastConfirmedAt(account) {
   if (account && account.confirmedBy && account.confirmedBy.at) return String(account.confirmedBy.at).slice(0, 10);
   if (account && account.proof && account.proof.at) return String(account.proof.at).slice(0, 10);
@@ -376,11 +430,18 @@ function markMonthlyCheckDone(vault, skippedCount) {
   return vault.lastReconcileAt;
 }
 
-// Bank-confirmed status (Phase 3.1). No app can check a card with the bank
-// in Pakistan today (no personal API; open banking is draft-only), so the
-// only proof is a real bank SMS that matched this exact account in
-// Intelligence. Confirmation is sticky: Undo reverses the balance change
-// only, never the confirmation — the bank SMS itself was real.
+// Bank-confirmed status. RULE CHANGE (Hashir, 2026-11-06): the
+// "Bank-confirmed" badge is earned ONLY by a total-amount screenshot or a
+// bank statement PDF — NEVER by an SMS. An SMS can set the balance (it is
+// bank data), but it never verifies the card. So NO code path calls
+// markAccountBankConfirmed today: the SMS paths (direct match in
+// Intelligence, review approval, CSV, manual add) never confirm. The
+// function below is RESERVED for the total-amount screenshot verification
+// (next phase, needs on-device OCR) — that phase will call it with its own
+// source. Do not call it from any SMS path. confirmedBy records with
+// source 'bank-sms' are Phase 3.1 history (before the rule change); they
+// still render the badge, and isBankConfirmed still reads them, so old
+// vaults keep their history.
 function isBankConfirmed(account) {
   return !!(account && account.confirmedBy && account.confirmedBy.source === 'bank-sms'
     && typeof account.confirmedBy.at === 'string');
@@ -444,12 +505,17 @@ function addNotification(vault, kind, text) {
   return n;
 }
 
-// Apply a transaction's balance effect to its account.
+// Apply a transaction's balance effect to its account. A null (unknown)
+// balance is left alone — a transaction cannot move a number that was
+// never set. The transaction is still recorded; the baseline, when a bank
+// source later sets it, accounts for it (see setBaselineFromBank).
 function applyEffect(account, txn) {
+  if (account.balance === null || account.balance === undefined) return;
   if (txn.direction === 'debit') account.balance = roundRs(account.balance - txn.amount);
   else account.balance = roundRs(account.balance + txn.amount);
 }
 function reverseEffect(account, txn) {
+  if (account.balance === null || account.balance === undefined) return;
   if (txn.direction === 'debit') account.balance = roundRs(account.balance + txn.amount);
   else account.balance = roundRs(account.balance - txn.amount);
 }
@@ -472,7 +538,9 @@ function approveTransaction(vault, txId) {
     sign + ' Rs ' + txn.amount.toLocaleString('en-PK') + (txn.merchant ? ' at ' + txn.merchant : '')
     + ' — ' + account.nickname + ' (•••• ' + account.last4 + ')');
   const threshold = Number((vault.settings && vault.settings.lowBalanceThreshold) || 0);
-  if (before >= threshold && account.balance < threshold) {
+  // No low-balance alert while the balance is unknown — there is no number
+  // to compare against the threshold.
+  if (isBalanceKnown(account) && before !== null && before >= threshold && account.balance < threshold) {
     addNotification(vault, 'low-balance',
       account.nickname + ' (•••• ' + account.last4 + ') is below Rs '
       + threshold.toLocaleString('en-PK') + ' — balance ' + fmtBalance(account.balance) + '.');
@@ -481,6 +549,7 @@ function approveTransaction(vault, txId) {
 }
 
 function fmtBalance(n) {
+  if (n === null || n === undefined) return 'Balance not set yet';
   return 'Rs ' + Number(n || 0).toLocaleString('en-PK');
 }
 
@@ -509,19 +578,28 @@ function setLowBalanceThreshold(vault, n) {
 
 function totals(vault) {
   let total = 0;
+  let unknownCount = 0;
   const byProvider = {};
   for (const a of vault.accounts) {
-    total = roundRs(total + (Number(a.balance) || 0));
-    byProvider[a.provider] = roundRs((byProvider[a.provider] || 0) + (Number(a.balance) || 0));
+    if (!isBalanceKnown(a)) { unknownCount++; continue; }
+    total = roundRs(total + a.balance);
+    byProvider[a.provider] = roundRs((byProvider[a.provider] || 0) + a.balance);
   }
-  return { total, byProvider, count: vault.accounts.length };
+  return { total, byProvider, count: vault.accounts.length, unknownCount };
 }
 
 // Rebuild every balance from starting balances + approved transactions.
-// Returns { ok, mismatches: [{accountId, stored, computed}] }.
+// Returns { ok, mismatches: [{accountId, stored, computed}], unknown: [ids] }.
+// Accounts whose baseline was never set (startingBalance null) cannot be
+// proved — they are listed under `unknown`, never counted as mismatches
+// and never silently treated as 0.
 function reconcile(vault) {
   const computed = {};
-  for (const a of vault.accounts) computed[a.id] = Number(a.startingBalance) || 0;
+  const unknown = [];
+  for (const a of vault.accounts) {
+    if (a.startingBalance === null || a.startingBalance === undefined) { unknown.push(a.id); continue; }
+    computed[a.id] = Number(a.startingBalance) || 0;
+  }
   for (const t of vault.transactions) {
     if (t.status !== 'approved') continue;
     if (computed[t.accountId] === undefined) continue;
@@ -529,11 +607,12 @@ function reconcile(vault) {
   }
   const mismatches = [];
   for (const a of vault.accounts) {
+    if (computed[a.id] === undefined) continue;
     if (roundRs(Number(a.balance) || 0) !== computed[a.id]) {
       mismatches.push({ accountId: a.id, stored: a.balance, computed: computed[a.id] });
     }
   }
-  return { ok: mismatches.length === 0, mismatches };
+  return { ok: mismatches.length === 0, mismatches, unknown };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
@@ -541,6 +620,7 @@ if (typeof module !== 'undefined' && module.exports) {
     PROVIDERS, ACCOUNT_TYPES, CATEGORIES, TX_SOURCES, MAX_MONEY,
     newId, roundRs, isDateStr, todayStr, containsSensitiveValue, scanSensitive,
     emptyVault, validateAccount, createAccount, findAccount,
+    setBaselineFromBank, isBalanceKnown,
     renameAccount, moveAccount, deleteAccount, removeProof,
     validProofRecord, attachProof,
     isBankConfirmed, markAccountBankConfirmed,
@@ -560,6 +640,7 @@ if (typeof window !== 'undefined') {
     PROVIDERS, ACCOUNT_TYPES, CATEGORIES, TX_SOURCES, MAX_MONEY,
     newId, roundRs, isDateStr, todayStr, containsSensitiveValue, scanSensitive,
     emptyVault, validateAccount, createAccount, findAccount,
+    setBaselineFromBank, isBalanceKnown,
     renameAccount, moveAccount, deleteAccount, removeProof,
     validProofRecord, attachProof,
     isBankConfirmed, markAccountBankConfirmed,
