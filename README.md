@@ -37,15 +37,18 @@ code.
   present → absent → half day; present is the default, only
   exceptions are stored), advances (full recovery or instalments),
   month-end pay worked out line by line
-  (salary − absent × (salary ÷ 30) − half × (salary ÷ 60) − advance
-  recovery = net payable), "Mark paid" locks the month, and a
-  plain-text pay statement ready to copy to WhatsApp. Example:
-  Rs 15,000 salary, 3 absent days, Rs 2,000 advance (full recovery)
-  pays Rs 15,000 − Rs 1,500 − Rs 2,000 = **Rs 11,500**. Paid leave
-  allowed is recorded on the helper but does not change the pay
-  working — every absent day is deducted. Pay is worked out on the
-  full monthly salary; a helper who joined mid-month is paid in full
-  unless absent days are marked.
+  (salary — prorated from the join date if the helper joined
+  mid-month — − charged absent × (salary ÷ 30) − charged half ×
+  (salary ÷ 60) − advance recovery = net payable), "Mark paid" locks
+  the month, and a plain-text pay statement ready to copy to WhatsApp.
+  The first 2 absent days each month are free (paid leave — as many as
+  the helper's paid leave allows); extra absent days deduct one day's
+  pay, a half day deducts half that. Example: Rs 15,000 salary,
+  3 absent days, Rs 2,000 advance (full recovery), 2 days paid leave:
+  the first 2 absent days are free, so it pays
+  Rs 15,000 − Rs 500 − Rs 2,000 = **Rs 12,500**. With no paid leave
+  left it would pay Rs 11,500. A helper who joins on the 16th of a
+  30-day month is paid for 15 days: Rs 7,500 before any deductions.
 - **Deliveries** — doodhwala, newspaper, gas cylinder, water can,
   ironing, other; daily log (usual quantity, 0 = skipped day), monthly
   bill auto-summed from the log, "mark paid" per month, gas refill
