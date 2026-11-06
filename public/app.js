@@ -7,7 +7,7 @@
 // the one-time backup codes — never the codes themselves). The CryptoKey
 // lives in memory only and is wiped on lock. The server stores NOTHING.
 'use strict';
-/* global VaultCrypto, VaultModel, SmsParser, CsvImport, Cards, Intel, Proof, Totp */
+/* global VaultCrypto, VaultModel, SmsParser, CsvImport, Cards, Intel, Proof, Ocr, Totp */
 (function () {
   var LS_VAULT = 'pcv.vault';
   var LS_LOCKOUT = 'pcv.lockout';
@@ -19,7 +19,7 @@
     smsDraft: null, csvDraft: null,
     selectedAccountId: null, intelUndo: null,
     editingAccountId: null, pendingDeleteId: null, pendingProofRemoveId: null,
-    addProof: null, addProofBalance: null, reconcileSkipped: {},
+    addProof: null, addProofBalance: null, addScreenshot: null, reconcileSkipped: {},
     pending2fa: null, twoFaSetup: null,
     currentPage: 'wallet', profileDpDataUrl: null,
   };
@@ -743,18 +743,30 @@ function maskBal(n) {
       nickname: $('add-nick').value,
       last4: $('add-last4').value.trim(),
       // No balance here (Phase 3.5): a balance is never typed — it is set
-      // only by the bank, from a statement (below) or a bank SMS.
-      proof: state.addProof || null,
+      // only by the bank, from a statement, a total-amount screenshot
+      // (below) or a bank SMS. A verified screenshot is the card's proof
+      // and outranks a statement in the single proof slot.
+      proof: state.addScreenshot || state.addProof || null,
     };
     try {
       var created = VaultModel.createAccount(state.vault, input);
-      // Baseline from the bank (Phase 3.5): a statement uploaded with the
-      // card may already carry one clear balance — set it from the bank's
-      // own document, never from the user's hand.
+      // Baseline from the bank (Phase 3.5/3.6): a statement or a
+      // total-amount screenshot uploaded with the card may already carry
+      // one clear balance — set it from the bank's own document, never
+      // from the user's hand. A screenshot amount is the total now, so it
+      // wins over a statement balance.
       var baselineNote = '';
       if (state.addProofBalance) {
-        VaultModel.setBaselineFromBank(state.vault, created.id, state.addProofBalance.amount, 'statement');
-        baselineNote = ' Balance read from your statement: ' + fmtRs(state.addProofBalance.amount) + '.';
+        VaultModel.setBaselineFromBank(state.vault, created.id, state.addProofBalance.amount, state.addProofBalance.source || 'statement');
+        baselineNote = ' Balance read from your ' + (state.addProofBalance.source === 'screenshot' ? 'screenshot' : 'statement') + ': ' + fmtRs(state.addProofBalance.amount) + '.';
+      }
+      // Verification (Phase 3.6, Hashir's rule): ONLY a total-amount
+      // screenshot read by on-device OCR verifies a card here. An SMS
+      // never calls the verification marker — see the Intelligence
+      // section, which has no call to it anywhere.
+      if (state.addScreenshot) {
+        VaultModel.markAccountBankConfirmed(state.vault, created.id);
+        baselineNote += ' Card verified by your screenshot.';
       }
       await persist();
       render();
@@ -769,15 +781,21 @@ function maskBal(n) {
 
   // ---- Phase 3.3: statement proof on the Add Card page (optional) ----
   // The proof is the user's own record, checked only against what they
-  // typed (provider + last-4 + profile name). It never proves a card is
-  // real — only a real bank SMS does that (Phase 3.1).
+  // typed (provider + last-4 + profile name). A matching statement PDF
+  // verifies the card (rung 2 of the ladder); an SMS never does. A plain
+  // photo uploaded here is NOT read by the app — the total-amount
+  // screenshot check lives in its own input (onScreenshotFile, below).
   function resetAddProof() {
     state.addProof = null;
     state.addProofBalance = null;
+    state.addScreenshot = null;
     $('add-proof').value = '';
     $('add-proof-status').textContent = '';
     $('add-proof-error').textContent = '';
     hide($('add-proof-preview'));
+    $('add-shot').value = '';
+    $('add-shot-status').textContent = '';
+    $('add-shot-error').textContent = '';
   }
   function readFileAsDataUrl(file) {
     return new Promise(function (resolve, reject) {
@@ -813,13 +831,15 @@ function maskBal(n) {
       dataUrl: dataUrl, status: 'attached', at: new Date().toISOString(),
     };
     if (checked.kind === 'image') {
-      // No OCR in this app: show the screenshot next to the typed data and
-      // let the user confirm by eye. Never an automatic match for an image.
+      // This photo is not read by the app: show it next to the typed data
+      // and let the user confirm by eye. Never an automatic match for an
+      // image here — the OCR read lives in the total-amount screenshot
+      // input (onScreenshotFile), not in this statement box.
       state.addProof = record;
       $('add-proof-img').src = dataUrl;
       $('add-proof-typed').textContent = 'Provider: ' + provider + ' · Last 4: ' + last4
         + ' · Name: ' + (profileName || 'not set — set it on the Profile page to check it too');
-      status.textContent = 'Photo attached — the app can\'t read text from a screenshot, so check it yourself below.';
+      status.textContent = 'Photo attached — this photo isn\'t read by the app, so check it yourself below. (To verify with a screenshot, use the total-amount screenshot box.)';
       show($('add-proof-preview'));
       return;
     }
@@ -844,7 +864,7 @@ function maskBal(n) {
     if (text) {
       var found = Proof.extractStatementBalance(text);
       if (found.status === 'one') {
-        state.addProofBalance = { amount: found.amount, label: found.label, match: found.match };
+        state.addProofBalance = { amount: found.amount, label: found.label, match: found.match, source: 'statement' };
         status.textContent += ' Balance read from your statement: ' + fmtRs(found.amount) + '.';
       } else if (found.status === 'ambiguous') {
         status.textContent += ' The statement has several different balances — no balance was set. Paste a bank SMS instead.';
@@ -853,6 +873,7 @@ function maskBal(n) {
       }
     }
     if (!profileName) status.textContent += ' Set your name on the Profile page to check it against the statement too.';
+    if (state.addScreenshot) status.textContent += ' A verified screenshot is already attached — it stays the card\'s proof.';
     state.addProof = record;
   }
   function onProofSelfCheck() {
@@ -862,6 +883,56 @@ function maskBal(n) {
     state.addProof.status = 'self-checked';
     $('add-proof-status').textContent = '✓ You checked this screenshot yourself — saved as "self-checked".';
     hide($('add-proof-preview'));
+  }
+
+  // ---- Phase 3.6: total-amount screenshot verification on the Add page ----
+  // The screenshot is read ON THIS DEVICE by the vendored OCR engine —
+  // the image never leaves the phone or PC. Exactly ONE clear total
+  // amount verifies the card (and sets the baseline balance); anything
+  // else sets nothing and says so plainly. This is the ONLY path that
+  // marks a card verified (in addAccount, above) — an SMS never
+  // verifies a card.
+  async function onScreenshotFile() {
+    var err = $('add-shot-error');
+    var status = $('add-shot-status');
+    err.textContent = ''; status.textContent = '';
+    state.addScreenshot = null;
+    var file = $('add-shot').files[0];
+    if (!file) return;
+    var last4 = $('add-last4').value.trim();
+    if (!last4) {
+      status.textContent = 'Type the last 4 digits first — the screenshot is checked against them.';
+      return;
+    }
+    var dataUrl;
+    try { dataUrl = await readFileAsDataUrl(file); }
+    catch (e) { err.textContent = e.message; return; }
+    var checked = Ocr.validateScreenshotFile(dataUrl, file.size);
+    if (!checked.ok) { err.textContent = checked.errors.join(' '); return; }
+    status.textContent = 'Reading your screenshot on this device — the image never leaves your phone or PC…';
+    var text;
+    try { text = await Ocr.recognizeImage(file); }
+    catch (e) {
+      err.textContent = 'Couldn\'t read this screenshot — try a clearer photo, or upload your statement PDF instead.';
+      status.textContent = '';
+      return;
+    }
+    var found = Ocr.extractScreenshotAmount(text);
+    if (found.status === 'one') {
+      state.addScreenshot = {
+        kind: 'image', name: file.name, mime: file.type || 'image/jpeg',
+        dataUrl: dataUrl, status: 'screenshot-verified', at: new Date().toISOString(),
+      };
+      // The screenshot amount is the total now, so it wins over a
+      // statement balance for the baseline.
+      state.addProofBalance = { amount: found.amount, label: found.label, match: found.match, source: 'screenshot' };
+      status.textContent = '✓ Screenshot verified — total amount ' + fmtRs(found.amount) + ' read from your screenshot (' + found.label + ').';
+      if (state.addProof) status.textContent += ' This screenshot replaces the statement as the card\'s proof.';
+    } else if (found.status === 'ambiguous') {
+      status.textContent = 'This screenshot has several different amounts (' + found.amounts.map(fmtRs).join(', ') + ') — no balance was set. Upload your statement PDF instead.';
+    } else {
+      status.textContent = 'Couldn\'t read a clear total amount from this screenshot — upload your statement PDF instead.';
+    }
   }
 
   // Remove a statement proof from a saved card (two-tap, like delete).
@@ -991,12 +1062,27 @@ function maskBal(n) {
 
   // ---- Step 3: Intelligence — paste a bank SMS, the wallet updates itself ----
   async function parseSmsClick() {
+    var draft = SmsParser.parseSms($('sms-text').value);
+    if (!draft) {
+      $('sms-error').textContent = "Couldn't read this message — paste the full SMS your bank or wallet sent. OTPs are never read.";
+      return;
+    }
+    await handleSmsDraft(draft, 'paste');
+  }
+
+  // Shared by paste and SMS-screenshot: one parsed draft, one flow. An
+  // OCR draft NEVER updates directly — a misread amount must be
+  // correctable on the review card first, so it always goes to review,
+  // with the amount editable and the read text shown. Nothing is saved
+  // until the user approves. An SMS — pasted or screenshotted — never
+  // verifies a card (Hashir's rule): there is no verification call
+  // anywhere in this section.
+  async function handleSmsDraft(draft, source) {
     var err = $('sms-error');
     var box = $('sms-review');
     var res = $('intel-result');
     err.textContent = ''; box.innerHTML = ''; res.innerHTML = ''; hide(res);
     state.smsDraft = null; state.intelUndo = null;
-    var draft = SmsParser.parseSms($('sms-text').value);
     if (!draft) {
       err.textContent = "Couldn't read this message — paste the full SMS your bank or wallet sent. OTPs are never read.";
       return;
@@ -1005,10 +1091,12 @@ function maskBal(n) {
       err.textContent = 'Add an account first, then paste an SMS for it.';
       return;
     }
+    draft.source = source || 'paste';
     // Intelligence: an exact (provider + last-4) match updates directly —
-    // no amount entry, no account picking.
+    // no amount entry, no account picking. OCR drafts never take this
+    // path (see above) — they always go to the review card.
     var match = Intel.findIntelMatch(state.vault.accounts, draft.provider, draft.last4);
-    if (match.status === 'match') {
+    if (match.status === 'match' && draft.source !== 'ocr') {
       try {
         var out = Intel.applyIntelUpdate(state.vault, draft, match.account);
         await persist();
@@ -1036,9 +1124,17 @@ function maskBal(n) {
     if (!match) match = state.vault.accounts.find(function (a) { return a.provider === draft.provider; });
     var div = document.createElement('div');
     div.className = 'review';
+    // An OCR draft shows what the app read, and the amount is editable —
+    // a misread must be fixable before anything is saved.
+    var amountRow = draft.source === 'ocr'
+      ? '<label for="sms-amount">Amount (Rs) — fix it if the read is wrong</label><input id="sms-amount" type="text" inputmode="numeric" value="' + esc(String(draft.amount)) + '">'
+      : '<div>Amount: <strong>' + (draft.direction === 'debit' ? '−' : '+') + ' ' + esc(fmtRs(draft.amount)) + '</strong> (' + esc(draft.direction) + ')</div>';
     div.innerHTML = '<h3>Review — nothing is saved yet</h3>' +
+      (draft.source === 'ocr'
+        ? '<div class="muted">Read from your screenshot — the image never left this device. Check it below; fix the amount if the read is wrong.</div>'
+          + '<div class="muted">“' + esc(draft.raw || '') + '”</div>' : '') +
       '<div>Provider: <strong>' + esc(draft.provider) + '</strong></div>' +
-      '<div>Amount: <strong>' + (draft.direction === 'debit' ? '−' : '+') + ' ' + esc(fmtRs(draft.amount)) + '</strong> (' + esc(draft.direction) + ')</div>' +
+      amountRow +
       '<div>Merchant: <strong>' + esc(draft.merchant || '— not in the SMS') + '</strong></div>' +
       '<div>Date: <strong>' + esc(draft.date) + '</strong>' + (draft.dateGuessed ? ' <span class="muted">(no date in the SMS — today assumed)</span>' : '') + '</div>' +
       (draft.availableBalance != null ? '<div>Bank says available balance: <strong>' + esc(fmtRs(draft.availableBalance)) + '</strong></div>' : '') +
@@ -1050,9 +1146,18 @@ function maskBal(n) {
     var sel = $('sms-account');
     accountOptions(sel, match ? match.id : null);
     var note = $('sms-balance-note');
+    // The amount the review card is about: the parsed amount, or the
+    // user's corrected amount on an OCR draft.
+    var currentDraftAmount = function () {
+      if (draft.source !== 'ocr') return draft.amount;
+      var el = $('sms-amount');
+      var n = el ? Math.round(Number(String(el.value).replace(/,/g, '').trim())) : NaN;
+      return Number.isFinite(n) && n > 0 ? n : draft.amount;
+    };
     var updateNote = function () {
       var a = state.vault.accounts.find(function (x) { return x.id === sel.value; });
       if (!a) { note.textContent = ''; return; }
+      var amt = currentDraftAmount();
       // Unknown balance (Phase 3.5): approving records the transaction;
       // the balance stays unknown unless this SMS states an available
       // balance — never show a computed number from nothing.
@@ -1063,12 +1168,13 @@ function maskBal(n) {
           + ' Paste another SMS or upload a statement to set it.';
         return;
       }
-      var after = draft.direction === 'debit' ? a.balance - draft.amount : a.balance + draft.amount;
+      var after = draft.direction === 'debit' ? a.balance - amt : a.balance + amt;
       note.textContent = 'After approval, ' + a.nickname + ' will show ' + fmtRs(after)
         + (draft.availableBalance != null && draft.availableBalance !== after
           ? ' (bank says ' + fmtRs(draft.availableBalance) + ' — small differences happen when other transactions are not in the vault yet).' : '.');
     };
     sel.addEventListener('change', updateNote);
+    if (draft.source === 'ocr') $('sms-amount').addEventListener('input', updateNote);
     updateNote();
     $('sms-approve-btn').addEventListener('click', approveSms);
     $('sms-discard-btn').addEventListener('click', function () { box.innerHTML = ''; $('sms-text').value = ''; state.smsDraft = null; });
@@ -1078,9 +1184,22 @@ function maskBal(n) {
     var draft = state.smsDraft;
     var accountId = $('sms-account').value;
     if (!draft || !accountId) return;
+    // An OCR draft carries an editable amount: the user's correction is
+    // what gets saved, never the raw read. A bad correction is rejected
+    // instead of saved.
+    var amount = draft.amount;
+    if (draft.source === 'ocr') {
+      var amtEl = $('sms-amount');
+      var n = amtEl ? Math.round(Number(String(amtEl.value).replace(/,/g, '').trim())) : NaN;
+      if (!Number.isFinite(n) || n <= 0) {
+        $('sms-error').textContent = 'Amount must be a number greater than 0 — fix it before approving.';
+        return;
+      }
+      amount = n;
+    }
     try {
       var txn = VaultModel.addTransaction(state.vault, {
-        accountId, amount: draft.amount, direction: draft.direction,
+        accountId, amount: amount, direction: draft.direction,
         merchant: draft.merchant, date: draft.date, source: 'sms',
       });
       VaultModel.approveTransaction(state.vault, txn.id);
@@ -1119,6 +1238,43 @@ function maskBal(n) {
     res.innerHTML = '<div class="big">Undone — balance ' + (out.balance === null || out.balance === undefined
       ? 'still not set.' : 'back to ' + esc(fmtRs(out.balance)) + '.') + '</div>';
     show(res);
+  }
+
+  // ---- Phase 3.6: SMS screenshot upload (Intelligence) ----
+  // No time to paste the SMS? Upload a screenshot of it instead. The
+  // image is read ON THIS DEVICE by the vendored OCR engine — it never
+  // leaves the phone or PC — and the text goes through the SAME parser
+  // and the SAME review flow as pasting. Nothing is saved until the user
+  // approves the review card, and an OCR draft never updates directly.
+  // An SMS screenshot never verifies a card (Hashir's rule).
+  async function onSmsShotFile() {
+    var err = $('sms-error');
+    var status = $('sms-shot-status');
+    err.textContent = ''; status.textContent = '';
+    var file = $('sms-shot').files[0];
+    if (!file) return;
+    var dataUrl;
+    try { dataUrl = await readFileAsDataUrl(file); }
+    catch (e) { err.textContent = e.message; $('sms-shot').value = ''; return; }
+    var checked = Ocr.validateScreenshotFile(dataUrl, file.size);
+    if (!checked.ok) { err.textContent = checked.errors.join(' '); $('sms-shot').value = ''; return; }
+    status.textContent = 'Reading your screenshot on this device — the image never leaves your phone or PC…';
+    var text;
+    try { text = await Ocr.recognizeImage(file); }
+    catch (e) {
+      err.textContent = 'Couldn\'t read this screenshot — try pasting the SMS text instead.';
+      status.textContent = '';
+      $('sms-shot').value = '';
+      return;
+    }
+    status.textContent = '';
+    $('sms-shot').value = '';
+    var draft = Ocr.parseSmsFromOcrText(text);
+    if (!draft) {
+      err.textContent = "Couldn't read this message — the screenshot may not be a bank SMS. OTPs are never read.";
+      return;
+    }
+    await handleSmsDraft(draft, 'ocr');
   }
 
   // ---- Step 3: CSV import ----
@@ -1400,8 +1556,10 @@ function maskBal(n) {
     $('add-account-btn').addEventListener('click', addAccount);
     $('add-proof').addEventListener('change', onProofFile);
     $('add-proof-selfcheck-btn').addEventListener('click', onProofSelfCheck);
+    $('add-shot').addEventListener('change', onScreenshotFile);
     // If the card details change after a proof was attached, the proof no
     // longer matches what was typed — clear it so it must be re-uploaded.
+    // The same goes for a verified screenshot.
     ['add-provider', 'add-last4'].forEach(function (id) {
       $(id).addEventListener('change', function () {
         if (state.addProof) {
@@ -1411,9 +1569,17 @@ function maskBal(n) {
           $('add-proof-status').textContent = 'Card details changed — upload the statement again.';
           hide($('add-proof-preview'));
         }
+        if (state.addScreenshot) {
+          state.addScreenshot = null;
+          if (state.addProofBalance && state.addProofBalance.source === 'screenshot') state.addProofBalance = null;
+          $('add-shot').value = '';
+          $('add-shot-status').textContent = 'Card details changed — upload the screenshot again.';
+        }
       });
     });
     $('sms-parse-btn').addEventListener('click', parseSmsClick);
+    $('sms-shot-btn').addEventListener('click', function () { $('sms-shot').click(); });
+    $('sms-shot').addEventListener('change', onSmsShotFile);
     $('sms-text').addEventListener('paste', function () { setTimeout(parseSmsClick, 0); });
     $('csv-file').addEventListener('change', onCsvFile);
     $('csv-preview-btn').addEventListener('click', previewCsv);
