@@ -12,16 +12,6 @@
   var LS_VAULT = 'pcv.vault';
   var LS_LOCKOUT = 'pcv.lockout';
 
-  // Cards are revealed as their Phase 1 step lands (1 = crypto, 2 = model,
-  // 3 = add-account flows, 4 = backup). Security + connect cards are static
-  // information and always visible.
-  var STEP_DONE = 4;
-  var STEP_CARDS = {
-    2: ['accounts-card'],
-    3: ['add-account-card', 'sms-card', 'csv-card', 'txns-card', 'notifs-card'],
-    4: ['backup-card'],
-  };
-
   var state = {
     key: null, envelope: null, vault: null, passphrase: '',
     lockout: VaultCrypto.createLockoutState(),
@@ -29,6 +19,7 @@
     smsDraft: null, csvDraft: null,
     selectedAccountId: null, intelUndo: null,
     pending2fa: null, twoFaSetup: null,
+    currentPage: 'wallet', profileDpDataUrl: null,
   };
 
   // Backup-code hashes live OUTSIDE the vault (localStorage) so a code can
@@ -82,7 +73,7 @@
   }
 
   function showScreen(name) {
-    hide($('setup-screen')); hide($('unlock-screen')); hide($('vault-screen'));
+    hide($('setup-screen')); hide($('unlock-screen')); hide($('totp-screen')); hide($('vault-screen'));
     if (name) show($(name + '-screen'));
   }
 
@@ -103,6 +94,7 @@
     state.smsDraft = null; state.csvDraft = null;
     state.intelUndo = null; state.pending2fa = null; state.twoFaSetup = null;
     hideSecuring();
+    closeBell();
     setLockPill(true);
     showScreen('unlock');
     $('unlock-pin').value = ''; $('unlock-pass').value = '';
@@ -211,16 +203,146 @@
         esc(t.merchant || '—') + ' <span class="muted">(' + esc(t.date) + ' · ' + esc(t.source) + ' · ' + esc(t.status) + ')</span>';
       tx.appendChild(div);
     });
-    var nf = $('notifs-list');
-    nf.innerHTML = '';
-    $('notifs-empty').classList.toggle('hidden', v.notifications.length > 0);
-    v.notifications.slice().reverse().slice(0, 50).forEach(function (n) {
+    // Notifications live behind the bell, not on a page.
+    renderBell();
+    renderProfileHeader();
+  }
+
+  // ---- Phase 3: one page per job (hash routing) ----
+  function currentRoute() { return Nav.routeForHash(location.hash); }
+  function showPage(name) {
+    if (Nav.PAGES.indexOf(name) < 0) name = 'wallet';
+    state.currentPage = name;
+    document.querySelectorAll('.page').forEach(function (el) {
+      el.classList.toggle('hidden', el.id !== 'page-' + name);
+    });
+    document.querySelectorAll('.nav-btn[data-page]').forEach(function (b) {
+      b.classList.toggle('active', b.getAttribute('data-page') === name);
+    });
+    closeBell();
+    if (name === 'profile') fillProfileForm();
+  }
+  function closeBell() { hide($('notif-panel')); }
+  // Notifications live behind the bell, not on a page. The badge shows the
+  // unread count; opening the bell marks everything read and clears it.
+  function renderBell() {
+    if (!state.vault) return;
+    var unread = VaultModel.unreadNotificationCount(state.vault);
+    var badge = $('bell-badge');
+    badge.textContent = String(unread);
+    badge.classList.toggle('hidden', unread === 0);
+    var list = $('bell-list');
+    list.innerHTML = '';
+    $('bell-empty').classList.toggle('hidden', state.vault.notifications.length > 0);
+    state.vault.notifications.slice().reverse().slice(0, 50).forEach(function (n) {
       var div = document.createElement('div');
       div.className = 'notif';
       div.innerHTML = '<span class="pill ' + (n.kind === 'low-balance' ? 'amber' : 'green') + '">' + esc(n.kind) + '</span> ' +
         esc(n.text) + ' <span class="muted">(' + esc(String(n.at || '').slice(0, 16).replace('T', ' ')) + ')</span>';
-      nf.appendChild(div);
+      list.appendChild(div);
     });
+  }
+  async function toggleBell() {
+    var panel = $('notif-panel');
+    if (panel.classList.contains('hidden')) {
+      renderBell();
+      show(panel);
+      if (state.vault && VaultModel.markAllNotificationsRead(state.vault) > 0) {
+        await persist();
+        renderBell();
+      }
+    } else {
+      closeBell();
+    }
+  }
+  function renderProfileHeader() {
+    if (!state.vault) return;
+    var p = state.vault.profile || { displayName: '', dp: null };
+    var name = (p.displayName || '').trim() || 'My Vault';
+    var initial = name.charAt(0).toUpperCase() || 'V';
+    $('sidebar-name').textContent = name;
+    $('topbar-name').textContent = name;
+    [['sidebar-dp', 'sidebar-dp-initials'], ['topbar-dp', 'topbar-dp-initials']].forEach(function (pair) {
+      var img = $(pair[0]), ini = $(pair[1]);
+      ini.textContent = initial;
+      if (p.dp) { img.src = p.dp; show(img); hide(ini); }
+      else { hide(img); show(ini); }
+    });
+  }
+  function fillProfileForm() {
+    if (!state.vault) return;
+    var p = state.vault.profile || { displayName: '', phone: '', email: '', dp: null };
+    $('profile-name').value = p.displayName || '';
+    $('profile-phone').value = p.phone || '';
+    $('profile-email').value = p.email || '';
+    state.profileDpDataUrl = null;
+    var prev = $('profile-dp-preview'), ini = $('profile-dp-initials');
+    var name = (p.displayName || '').trim() || 'My Vault';
+    ini.textContent = name.charAt(0).toUpperCase() || 'V';
+    if (p.dp) { prev.src = p.dp; show(prev); hide(ini); }
+    else { hide(prev); show(ini); }
+    $('profile-error').textContent = '';
+    $('profile-ok').textContent = '';
+  }
+  // Shrink a chosen photo to max 256px JPEG (quality steps down until it fits
+  // the 100 KB cap). The pure dimension math lives in model.js (dpTargetSize).
+  function downscaleDp(file) {
+    return new Promise(function (resolve, reject) {
+      var url = URL.createObjectURL(file);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        var t = VaultModel.dpTargetSize(img.naturalWidth, img.naturalHeight);
+        var canvas = document.createElement('canvas');
+        canvas.width = t.width; canvas.height = t.height;
+        var ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, t.width, t.height);
+        var qualities = [0.8, 0.6, 0.4];
+        for (var i = 0; i < qualities.length; i++) {
+          var dataUrl = canvas.toDataURL('image/jpeg', qualities[i]);
+          if (VaultModel.dpByteLength(dataUrl) <= VaultModel.MAX_DP_BYTES) { resolve(dataUrl); return; }
+        }
+        reject(new Error('That photo is too large even after shrinking — try a smaller one.'));
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); reject(new Error('That file is not a photo I can read.')); };
+      img.src = url;
+    });
+  }
+  async function onProfileDpFile() {
+    var file = $('profile-dp-input').files && $('profile-dp-input').files[0];
+    var err = $('profile-error');
+    err.textContent = '';
+    if (!file) return;
+    if (!file.type || file.type.indexOf('image/') !== 0) { err.textContent = 'Pick an image file.'; return; }
+    try {
+      state.profileDpDataUrl = await downscaleDp(file);
+      var prev = $('profile-dp-preview'), ini = $('profile-dp-initials');
+      prev.src = state.profileDpDataUrl;
+      show(prev); hide(ini);
+      $('profile-ok').textContent = 'Photo ready — tap Save profile to keep it.';
+    } catch (e) {
+      err.textContent = e.message;
+      state.profileDpDataUrl = null;
+    }
+  }
+  async function saveProfile() {
+    var err = $('profile-error'), ok = $('profile-ok');
+    err.textContent = ''; ok.textContent = '';
+    var input = {
+      displayName: $('profile-name').value,
+      phone: $('profile-phone').value,
+      email: $('profile-email').value,
+    };
+    if (state.profileDpDataUrl) input.dp = state.profileDpDataUrl;
+    try {
+      VaultModel.setProfile(state.vault, input);
+      state.profileDpDataUrl = null;
+      await persist();
+      render();
+      ok.textContent = 'Profile saved.';
+    } catch (e) {
+      err.textContent = (e.errors && e.errors.length) ? e.errors.join(' ') : e.message;
+    }
   }
 
   // Enter the vault after the PIN (and, when on, the 2FA code) has passed.
@@ -228,6 +350,7 @@
     state.lastActive = Date.now();
     setLockPill(false);
     showScreen('vault');
+    showPage(currentRoute());
     render();
     showSecuring(state.vault.accounts[0] || null, doneLabel || 'Vault unlocked — welcome back.');
   }
@@ -270,6 +393,8 @@
     $('unlock-btn').disabled = true;
     try {
       var out = await VaultCrypto.unlockVault(pin, pass, state.envelope);
+      // Phase 1/2 vaults have no profile key — migrate so they load fine.
+      out.vault = VaultModel.migrateVault(out.vault);
       state.lockout = VaultCrypto.recordSuccess();
       saveLockout();
       // Second factor: if 2FA is on, the PIN alone only unlocks the vault
@@ -785,7 +910,7 @@
           var out = await VaultCrypto.unlockVault(pin, pass, envelope);
           saveEnvelope(envelope);
           state.key = out.key;
-          state.vault = out.vault;
+          state.vault = VaultModel.migrateVault(out.vault);
           state.lockout = VaultCrypto.recordSuccess();
           saveLockout();
           div.remove();
@@ -803,17 +928,26 @@
     reader.readAsText(file);
   }
 
-  function revealStepCards() {
-    Object.keys(STEP_CARDS).forEach(function (step) {
-      if (Number(step) <= STEP_DONE) return; // not landed yet: keep hidden
-      STEP_CARDS[step].forEach(function (id) { var el = $(id); if (el) hide(el); });
-    });
-  }
-
   function boot() {
-    revealStepCards();
     loadStored();
     populateProviders();
+    // Phase 3: sidebar navigation (hash routing) + bell + profile.
+    document.querySelectorAll('.nav-btn[data-page]').forEach(function (b) {
+      b.addEventListener('click', function () { location.hash = '#/' + b.getAttribute('data-page'); });
+    });
+    window.addEventListener('hashchange', function () { if (state.vault) showPage(currentRoute()); });
+    $('bell-btn').addEventListener('click', function (e) { e.stopPropagation(); toggleBell(); });
+    $('bell-mark-read').addEventListener('click', async function () {
+      if (state.vault && VaultModel.markAllNotificationsRead(state.vault) > 0) { await persist(); renderBell(); }
+    });
+    document.addEventListener('click', function (e) {
+      var panel = $('notif-panel');
+      if (!panel.classList.contains('hidden') && !panel.contains(e.target) && !$('bell-btn').contains(e.target)) closeBell();
+    });
+    document.addEventListener('keydown', function (e) { if (e.key === 'Escape') closeBell(); });
+    $('wallet-add-btn').addEventListener('click', function () { location.hash = '#/add'; });
+    $('profile-dp-input').addEventListener('change', onProfileDpFile);
+    $('profile-save-btn').addEventListener('click', saveProfile);
     $('setup-btn').addEventListener('click', setup);
     $('unlock-btn').addEventListener('click', unlock);
     $('totp-btn').addEventListener('click', totpSubmit);
