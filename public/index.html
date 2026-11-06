@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Personal Card Vault — your cards, only yours</title>
+<link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">V</span><h1>Personal Card Vault</h1></div>
+  <span class="centre-pill">🔒 Card details are encrypted end-to-end…</span>
+  <span id="lock-pill" class="lock-pill locked">Locked</span>
+</header>
+<main>
+  <!-- STEP 1: first run — set the PIN that locks the vault -->
+  <section id="setup-screen" class="card hidden">
+    <h2>Set up your vault</h2>
+    <p class="muted">Your vault lives <strong>only on this device</strong>. The server stores
+      nothing — not your PIN, not your cards, not your balances. Everything is
+      locked with your PIN (and an optional passphrase) before it is saved.</p>
+    <div class="warn"><strong>No recovery, by design.</strong> If you forget your PIN (and
+      passphrase, if you set one), the vault cannot be opened by anyone — not even
+      us. There is no "forgot PIN". Write your PIN down somewhere safe, or export
+      an encrypted backup (Settings) after setup.</div>
+    <label for="setup-pin">6-digit PIN</label>
+    <input id="setup-pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6" placeholder="e.g. 482917">
+    <label for="setup-pin2">Confirm PIN</label>
+    <input id="setup-pin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6" placeholder="type the PIN again">
+    <label for="setup-pass">Optional passphrase (extra lock — at least 4 characters)</label>
+    <input id="setup-pass" type="password" autocomplete="new-password" placeholder="leave empty if you don't want one">
+    <button id="setup-btn">Create my vault</button>
+    <div id="setup-error" class="error"></div>
+  </section>
+
+  <!-- STEP 1: unlock -->
+  <section id="unlock-screen" class="card hidden">
+    <h2>Unlock your vault</h2>
+    <p class="muted">Enter your PIN to open the vault on this device.</p>
+    <label for="unlock-pin">6-digit PIN</label>
+    <input id="unlock-pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="6" placeholder="••••••">
+    <label for="unlock-pass">Passphrase (only if you set one)</label>
+    <input id="unlock-pass" type="password" autocomplete="current-password" placeholder="leave empty if you didn't set one">
+    <button id="unlock-btn">Unlock</button>
+    <div id="unlock-error" class="error"></div>
+    <div id="lockout-note" class="warn hidden"></div>
+    <p class="muted">5 wrong PINs lock the vault for a growing delay (30s, then doubling,
+      up to 15 minutes). The vault locks itself after 5 minutes without use.</p>
+  </section>
+
+  <!-- STEP 1b: second factor (only when 2FA is on) -->
+  <section id="totp-screen" class="card hidden">
+    <h2>Second step — authenticator code</h2>
+    <p class="muted">Two-factor is on. Open your authenticator app (Google Authenticator,
+      Authy, or any TOTP app) and enter the 6-digit code. You can also use one
+      of your backup codes instead.</p>
+    <label for="totp-code">6-digit code</label>
+    <input id="totp-code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="••••••">
+    <button id="totp-btn">Verify &amp; open vault</button>
+    <div id="totp-error" class="error"></div>
+    <p class="muted">Wrong codes count toward the lockout, the same as wrong PINs.</p>
+  </section>
+
+  <!-- Vault home (reel layout: cards | add flows | summary) -->
+  <section id="vault-screen" class="hidden">
+    <div class="vault-grid">
+      <div class="vault-col">
+        <div class="card" id="accounts-card">
+          <div class="row">
+            <div>
+              <h2 style="margin:0">Your cards</h2>
+              <div class="muted">Total across all accounts: <strong id="total-balance">Rs 0</strong>
+                <button id="hide-btn" class="small toggle-btn">Hide balances</button></div>
+            </div>
+            <div style="flex:0 0 auto"><button id="lock-btn" class="secondary">Lock vault</button></div>
+          </div>
+          <div id="accounts-list" class="carousel"></div>
+          <p id="accounts-empty" class="muted">No accounts yet. Add your first card or account below.</p>
+          <div class="badges"><span class="pill">PBKDF2 · AES-256-GCM</span> <span class="pill">Local only — no server</span></div>
+        </div>
+      </div>
+
+      <div class="vault-col">
+        <div class="card" id="sms-card">
+          <h2>Intelligence <span class="pill green">auto-update</span></h2>
+          <p class="muted">Paste your bank SMS here — the wallet finds the account and updates
+            it itself. Works for money cut and money received. If it cannot tell
+            which account the SMS belongs to, it shows you a review card instead —
+            <strong>nothing is saved until you approve it.</strong></p>
+          <label for="sms-text">Paste your bank SMS here</label>
+          <textarea id="sms-text" rows="3" placeholder="Paste the SMS here…"></textarea>
+          <button id="sms-parse-btn">Update</button>
+          <div id="sms-error" class="error"></div>
+          <div id="intel-result" class="intel-result hidden"></div>
+          <div id="sms-review"></div>
+        </div>
+
+        <div class="card" id="add-account-card">
+          <h2>Add an account</h2>
+          <label for="add-provider">Provider</label>
+          <select id="add-provider"></select>
+          <div class="row">
+            <div><label for="add-type">Type</label>
+              <select id="add-type">
+                <option value="bank">Bank account</option>
+                <option value="debit">Debit card</option>
+                <option value="credit">Credit card</option>
+                <option value="wallet">Wallet</option>
+              </select></div>
+            <div><label for="add-last4">Last 4 digits (only)</label>
+              <input id="add-last4" type="text" inputmode="numeric" maxlength="4" placeholder="e.g. 1234"></div>
+          </div>
+          <label for="add-nick">Nickname</label>
+          <input id="add-nick" type="text" maxlength="40" placeholder="e.g. HBL Salary, JazzCash daily">
+          <label for="add-balance">Starting balance (PKR)</label>
+          <input id="add-balance" type="number" min="0" step="1" placeholder="e.g. 150000">
+          <button id="add-account-btn">Add account</button>
+          <div id="add-account-error" class="error"></div>
+          <div id="add-account-ok" class="ok"></div>
+        </div>
+
+        <div class="card" id="csv-card">
+          <h2>Import a statement (CSV)</h2>
+          <p class="muted">Download your statement CSV from your bank or wallet app, then upload it.
+            Map the columns, review every row, approve the ones you want. Duplicates
+            (same amount + date + merchant) are flagged and skipped.</p>
+          <label for="csv-file">CSV file</label>
+          <input id="csv-file" type="file" accept=".csv,text/csv">
+          <div id="csv-mapping" class="hidden">
+            <div class="row">
+              <div><label for="csv-col-date">Date column</label><select id="csv-col-date"></select></div>
+              <div><label for="csv-col-amount">Amount column</label><select id="csv-col-amount"></select></div>
+              <div><label for="csv-col-merchant">Merchant column</label><select id="csv-col-merchant"></select></div>
+              <div><label for="csv-col-direction">Direction column</label><select id="csv-col-direction"></select></div>
+            </div>
+            <p class="muted">Direction values: "debit"/"dr"/"withdrawal"/"debit" = money out,
+              "credit"/"cr"/"deposit" = money in. If your CSV has no direction column,
+              pick "— none (amount sign)" and negative amounts count as debit.</p>
+            <label for="csv-account">Add these transactions to</label>
+            <select id="csv-account"></select>
+            <button id="csv-preview-btn">Preview rows</button>
+          </div>
+          <div id="csv-error" class="error"></div>
+          <div id="csv-review"></div>
+        </div>
+      </div>
+
+      <div class="vault-col">
+        <div class="card" id="summary-card">
+          <h2>Summary</h2>
+          <div id="summary-list"></div>
+          <p id="summary-empty" class="muted">No accounts yet.</p>
+          <div class="sum-total"><span>Total</span><span id="summary-total">Rs 0</span></div>
+        </div>
+
+        <div class="card" id="connect-card">
+          <h2>Connect a bank</h2>
+          <p><span class="pill amber">Coming — not live yet</span></p>
+          <p class="muted">Automatic bank connection needs open banking. The State Bank of Pakistan
+            published <strong>draft</strong> Open Banking Regulations on 30 Oct 2026
+            (comments open until 30 Nov 2026). No bank offers a live personal API yet,
+            so no connection is possible today — and this app will never ask for your
+            bank login or password. When open banking goes live, this is where the
+            connection will appear.</p>
+        </div>
+
+        <div class="card" id="txns-card">
+          <h2>Transactions</h2>
+          <div id="txns-list"></div>
+          <p id="txns-empty" class="muted">No transactions yet.</p>
+        </div>
+
+        <div class="card" id="notifs-card">
+          <h2>Notifications</h2>
+          <div id="notifs-list"></div>
+          <p id="notifs-empty" class="muted">No notifications yet. Every approved transaction appears here, plus
+            low-balance alerts.</p>
+        </div>
+
+        <div class="card" id="backup-card">
+          <h2>Backup</h2>
+          <p class="muted">Export an encrypted backup file — it can only be restored with your PIN
+            (and passphrase, if you set one). Keep the file somewhere safe; the backup
+            never leaves this device unless you move it yourself.</p>
+          <div class="row">
+            <button id="export-btn">Export encrypted backup</button>
+            <label for="import-file" style="margin:0">Import a backup
+              <input id="import-file" type="file" accept=".json,application/json">
+            </label>
+          </div>
+          <div id="backup-error" class="error"></div>
+          <div id="backup-ok" class="ok"></div>
+        </div>
+
+        <!-- Security settings: 2FA, PIN, passphrase, auto-lock, backup codes -->
+        <div class="card" id="security-settings-card">
+          <h2>Security settings</h2>
+          <div class="row">
+            <div><strong>Two-factor authentication</strong><div class="muted" id="2fa-status">Off — your vault opens with the PIN only.</div></div>
+            <div style="flex:0 0 auto"><button id="2fa-toggle-btn" class="secondary">Enable two-factor</button></div>
+          </div>
+          <div id="2fa-setup" class="hidden">
+            <p class="muted">Tap the link on your phone to open it in your authenticator app —
+              or type the key by hand. Then enter one code from the app to confirm.</p>
+            <div class="warn" id="2fa-secret-box">
+              <div>Manual key: <strong id="2fa-secret-text"></strong></div>
+              <div><a id="2fa-otpauth-link" href="#">Open in authenticator app</a> · <button id="2fa-copy-btn" class="small secondary">Copy key</button></div>
+            </div>
+            <div id="2fa-confirm-form">
+              <label for="2fa-confirm-code">Code from your authenticator app</label>
+              <input id="2fa-confirm-code" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
+              <button id="2fa-confirm-btn">Confirm &amp; turn on two-factor</button>
+              <div id="2fa-error" class="error"></div>
+            </div>
+            <div id="2fa-backup-box" class="hidden">
+              <p><strong>Your backup codes — shown once. Write them down.</strong>
+                Each code works once, in place of the authenticator code (the PIN is
+                still required). If you lose your phone and these codes, the vault
+                cannot be opened.</p>
+              <div id="2fa-backup-codes" class="review"></div>
+            </div>
+          </div>
+          <div id="2fa-disable" class="hidden">
+            <p class="muted">Turning off two-factor needs your PIN and a current authenticator code.</p>
+            <label for="2fa-off-pin">Your PIN</label>
+            <input id="2fa-off-pin" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+            <label for="2fa-off-code">Current authenticator code</label>
+            <input id="2fa-off-code" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
+            <button id="2fa-disable-btn" class="danger">Turn off two-factor</button>
+            <div id="2fa-disable-error" class="error"></div>
+          </div>
+          <hr>
+          <div class="row">
+            <div><label for="autolock-select">Auto-lock after</label>
+              <select id="autolock-select">
+                <option value="1">1 minute</option>
+                <option value="5" selected>5 minutes</option>
+                <option value="15">15 minutes</option>
+              </select></div>
+            <div><label>Hide balances</label>
+              <button id="settings-hide-btn" class="small toggle-btn">Hide balances</button></div>
+          </div>
+          <h3>Change PIN</h3>
+          <label for="change-pin-old">Current PIN</label>
+          <input id="change-pin-old" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+          <label for="change-pin-new">New PIN (6 digits)</label>
+          <input id="change-pin-new" type="password" inputmode="numeric" maxlength="6" placeholder="e.g. 482917">
+          <label for="change-pin-new2">Confirm new PIN</label>
+          <input id="change-pin-new2" type="password" inputmode="numeric" maxlength="6" placeholder="type the new PIN again">
+          <button id="change-pin-btn">Change PIN</button>
+          <div id="change-pin-error" class="error"></div>
+          <div id="change-pin-ok" class="ok"></div>
+          <h3>Change passphrase</h3>
+          <label for="change-pass-old">Current PIN</label>
+          <input id="change-pass-old" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+          <label for="change-pass-new">New passphrase (at least 4 characters, empty = remove it)</label>
+          <input id="change-pass-new" type="password" placeholder="leave empty to remove the passphrase">
+          <button id="change-pass-btn">Change passphrase</button>
+          <div id="change-pass-error" class="error"></div>
+          <div id="change-pass-ok" class="ok"></div>
+          <h3>Backup codes</h3>
+          <p class="muted">Codes cannot be shown again — only their fingerprints are stored.
+            <span id="backup-count">No backup codes are stored.</span>
+            Generate a new set to replace them (the old set stops working).</p>
+          <label for="show-codes-pin">Your PIN</label>
+          <input id="show-codes-pin" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+          <button id="show-codes-btn" class="secondary">Generate new backup codes</button>
+          <div id="show-codes-error" class="error"></div>
+          <div id="show-codes-box" class="hidden">
+            <p><strong>New backup codes — shown once. Write them down.</strong></p>
+            <div id="show-codes-list" class="review"></div>
+          </div>
+        </div>
+
+        <div class="card" id="security-card">
+          <h2>How your data is protected</h2>
+          <p class="muted">Local-first: everything lives only in this browser, encrypted with
+            PBKDF2 + AES-256-GCM under your PIN. The server stores nothing. The vault
+            never holds full card numbers, CVV, card PINs, expiry dates or bank
+            passwords — only the last 4 digits, the provider, a nickname and the
+            balance. A vault that cannot spend your money cannot be robbed.</p>
+          <p class="muted"><strong>Honest limit:</strong> software encryption is only as secure as
+            this device. On a rooted phone, or a shared device left unlocked, someone
+            with the app open can see the vault in plain text. Keep your device locked
+            and your PIN private.</p>
+          <p class="muted"><strong>Honest limit:</strong> no live bank sync — no Pakistani bank or
+            wallet offers a personal API today. Balances update when you add a
+            transaction, approve a pasted SMS, or import a statement.</p>
+          <p class="muted"><strong>Two-factor:</strong> turn it on in Security settings and
+            unlocking also needs a code from your authenticator app, plus 10
+            one-time backup codes for a lost phone. The secret lives inside the
+            vault (protected by your PIN); the backup codes are stored as
+            fingerprints only, so they cannot be shown again — generate a new
+            set to replace them.</p>
+        </div>
+      </div>
+    </div>
+    <!-- Stepper sits at the bottom (like the reel's Bag → Delivery → Payment → Done bar) -->
+    <div id="vault-stepper" class="stepper glass">
+      <span class="step done" id="step-setup"><span class="dot">✓</span>Set up</span>
+      <span class="sep">→</span>
+      <span class="step active" id="step-add"><span class="dot">2</span>Add card</span>
+      <span class="sep">→</span>
+      <span class="step" id="step-done"><span class="dot">3</span>Done</span>
+    </div>
+  </section>
+</main>
+
+<!-- Securing overlay (reel state 2 → 3): panels blur out, card floats centre -->
+<div id="securing-overlay" class="securing-overlay hidden">
+  <div id="securing-card-slot"></div>
+  <p id="securing-title" class="sec-title">Securing your payment</p>
+  <p id="securing-sub" class="sec-sub">Processing Secure Transaction… · Encrypting card details…</p>
+  <div class="sec-progress"><div id="securing-progress"></div></div>
+</div>
+
+<script src="/vault.js"></script>
+<script src="/model.js"></script>
+<script src="/sms.js"></script>
+<script src="/csv.js"></script>
+<script src="/cards.js"></script>
+<script src="/intel.js"></script>
+<script src="/totp.js"></script>
+<script src="/app.js"></script>
+</body>
+</html>
