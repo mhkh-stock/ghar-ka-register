@@ -19,7 +19,7 @@
     smsDraft: null, csvDraft: null,
     selectedAccountId: null, intelUndo: null,
     editingAccountId: null, pendingDeleteId: null, pendingProofRemoveId: null,
-    addProof: null, reconcileSkipped: {},
+    addProof: null, addProofBalance: null, reconcileSkipped: {},
     pending2fa: null, twoFaSetup: null,
     currentPage: 'wallet', profileDpDataUrl: null,
   };
@@ -49,7 +49,12 @@
     });
   }
   function fmtRs(n) { return 'Rs ' + Number(n || 0).toLocaleString('en-PK'); }
-  function maskBal(n) { return state.hideBalances ? 'Rs ••••' : fmtRs(n); }
+  // Unknown balance (Phase 3.5): say so plainly — never "Rs 0" for a number
+// the bank never stated. Hide-balances only masks a real number.
+function maskBal(n) {
+  if (n === null || n === undefined) return 'Balance not set yet';
+  return state.hideBalances ? 'Rs ••••' : fmtRs(n);
+}
 
   function loadStored() {
     try { state.envelope = JSON.parse(localStorage.getItem(LS_VAULT) || 'null'); } catch (_e) { state.envelope = null; }
@@ -167,9 +172,13 @@
   function render() {
     if (!state.vault) return;
     var v = state.vault;
-    var total = 0;
-    v.accounts.forEach(function (a) { total += Number(a.balance) || 0; });
-    $('total-balance').textContent = maskBal(total);
+    // Totals add ONLY known balances (Phase 3.5) — VaultModel.totals()
+    // skips unknown balances and counts them, never as 0.
+    var tot = VaultModel.totals(v);
+    $('total-balance').textContent = (v.accounts.length > 0 && tot.unknownCount === v.accounts.length)
+      ? 'Balance not set yet' : maskBal(tot.total);
+    $('total-unknown').textContent = tot.unknownCount > 0
+      ? ' · ' + tot.unknownCount + (tot.unknownCount === 1 ? ' balance' : ' balances') + ' not set yet' : '';
     // Card carousel (reel card visual, per-provider gradient). Each card
     // sits in a slot with its own compact action row (Phase 3.2).
     var list = $('accounts-list');
@@ -193,7 +202,11 @@
         + '<span class="amt">' + esc(maskBal(a.balance)) + '</span>' + Cards.confirmationBadge(a)
         + sumActionsHtml(a, i, v.accounts.length) + '</div>';
     }).join('');
-    $('summary-total').textContent = maskBal(total);
+    $('summary-total').textContent = (v.accounts.length > 0 && tot.unknownCount === v.accounts.length)
+      ? 'Balance not set yet' : maskBal(tot.total);
+    $('summary-unknown').textContent = tot.unknownCount > 0
+      ? 'Total across ' + v.accounts.length + (v.accounts.length === 1 ? ' account' : ' accounts')
+        + ' · ' + tot.unknownCount + (tot.unknownCount === 1 ? ' balance' : ' balances') + ' not set yet' : '';
     $('summary-empty').classList.toggle('hidden', v.accounts.length > 0);
     // Edit panel (Phase 3.2): visible only while editing one card.
     $('edit-account-card').classList.toggle('hidden', !state.editingAccountId);
@@ -292,11 +305,23 @@
       kind: 'pdf', name: file.name, mime: 'application/pdf', dataUrl: dataUrl,
       status: result === 'match' ? 'match' : 'attached', at: new Date().toISOString(),
     });
+    // Baseline from the bank (Phase 3.5): a PDF with exactly ONE clear
+    // balance sets it now. An image, a PDF with no clear balance, or
+    // several balances sets nothing. (A mismatched statement never reaches
+    // here — it returns above.)
+    var baselineNote = '';
+    if (text) {
+      var found = Proof.extractStatementBalance(text);
+      if (found.status === 'one') {
+        VaultModel.setBaselineFromBank(state.vault, accountId, found.amount, 'statement');
+        baselineNote = ' Balance read from your statement: ' + fmtRs(found.amount) + '.';
+      }
+    }
     await persist();
     render();
-    ok.textContent = result === 'match'
+    ok.textContent = (result === 'match'
       ? '✓ Statement matches — this card is checked.'
-      : 'Statement attached — couldn\'t read the text, kept as your record. It does not count as a re-check.';
+      : 'Statement attached — couldn\'t read the text, kept as your record. It does not count as a re-check.') + baselineNote;
   }
   function toggleReconcileSkip(accountId) {
     if (state.reconcileSkipped[accountId]) delete state.reconcileSkipped[accountId];
@@ -717,15 +742,24 @@
       type: $('add-type').value,
       nickname: $('add-nick').value,
       last4: $('add-last4').value.trim(),
-      balance: $('add-balance').value === '' ? 0 : Number($('add-balance').value),
+      // No balance here (Phase 3.5): a balance is never typed — it is set
+      // only by the bank, from a statement (below) or a bank SMS.
       proof: state.addProof || null,
     };
     try {
       var created = VaultModel.createAccount(state.vault, input);
+      // Baseline from the bank (Phase 3.5): a statement uploaded with the
+      // card may already carry one clear balance — set it from the bank's
+      // own document, never from the user's hand.
+      var baselineNote = '';
+      if (state.addProofBalance) {
+        VaultModel.setBaselineFromBank(state.vault, created.id, state.addProofBalance.amount, 'statement');
+        baselineNote = ' Balance read from your statement: ' + fmtRs(state.addProofBalance.amount) + '.';
+      }
       await persist();
       render();
-      ok.textContent = 'Account added: ' + input.nickname + ' (•••• ' + input.last4 + ').';
-      $('add-nick').value = ''; $('add-last4').value = ''; $('add-balance').value = '';
+      ok.textContent = 'Account added: ' + input.nickname + ' (•••• ' + input.last4 + ').' + baselineNote;
+      $('add-nick').value = ''; $('add-last4').value = '';
       resetAddProof();
       showSecuring(created, 'Saved securely!');
     } catch (e) {
@@ -739,6 +773,7 @@
   // real — only a real bank SMS does that (Phase 3.1).
   function resetAddProof() {
     state.addProof = null;
+    state.addProofBalance = null;
     $('add-proof').value = '';
     $('add-proof-status').textContent = '';
     $('add-proof-error').textContent = '';
@@ -757,6 +792,7 @@
     var status = $('add-proof-status');
     err.textContent = ''; status.textContent = ''; hide($('add-proof-preview'));
     state.addProof = null;
+    state.addProofBalance = null;
     var file = $('add-proof').files[0];
     if (!file) return;
     var dataUrl;
@@ -800,6 +836,21 @@
         + ' — check you uploaded the right statement. It is kept only as "doesn\'t match".';
     } else {
       status.textContent = 'Statement attached — couldn\'t read the text, kept as your record.';
+    }
+    // Balance from the bank (Phase 3.5): a PDF with exactly ONE clear
+    // balance sets the baseline when the card is added. No clear balance,
+    // or several different ones, sets nothing — the user is told so
+    // plainly and can paste a bank SMS instead. Never guessed.
+    if (text) {
+      var found = Proof.extractStatementBalance(text);
+      if (found.status === 'one') {
+        state.addProofBalance = { amount: found.amount, label: found.label, match: found.match };
+        status.textContent += ' Balance read from your statement: ' + fmtRs(found.amount) + '.';
+      } else if (found.status === 'ambiguous') {
+        status.textContent += ' The statement has several different balances — no balance was set. Paste a bank SMS instead.';
+      } else {
+        status.textContent += ' No clear balance found in this statement — paste a bank SMS instead.';
+      }
     }
     if (!profileName) status.textContent += ' Set your name on the Profile page to check it against the statement too.';
     state.addProof = record;
@@ -929,7 +980,10 @@
     state.vault.accounts.forEach(function (a) {
       var o = document.createElement('option');
       o.value = a.id;
-      o.textContent = a.nickname + ' — ' + a.provider + ' •••• ' + a.last4 + ' (' + fmtRs(a.balance) + ')';
+      // Unknown balance (Phase 3.5): say so — never "Rs 0" for a number
+      // the bank never stated.
+      var balText = (a.balance === null || a.balance === undefined) ? 'balance not set yet' : fmtRs(a.balance);
+      o.textContent = a.nickname + ' — ' + a.provider + ' •••• ' + a.last4 + ' (' + balText + ')';
       if (a.id === preselectId) o.selected = true;
       sel.appendChild(o);
     });
@@ -959,9 +1013,8 @@
         var out = Intel.applyIntelUpdate(state.vault, draft, match.account);
         await persist();
         render();
-        var text = Intel.intelResultText(match.account, draft, out.prevBalance, out.newBalance);
+        var text = Intel.intelResultText(match.account, draft, out.prevBalance, out.newBalance, out.baselineSet);
         res.innerHTML = '<div class="big">' + esc(text.line) + '</div>'
-          + (out.confirmed ? '<div class="ok">✓ Bank-confirmed — this SMS came from your bank, so this card is proven real.</div>' : '')
           + (text.cross ? '<div class="cross">' + esc(text.cross) + '</div>' : '')
           + '<button id="intel-undo-btn" class="secondary">Undo this update</button>';
         show(res);
@@ -1000,6 +1053,16 @@
     var updateNote = function () {
       var a = state.vault.accounts.find(function (x) { return x.id === sel.value; });
       if (!a) { note.textContent = ''; return; }
+      // Unknown balance (Phase 3.5): approving records the transaction;
+      // the balance stays unknown unless this SMS states an available
+      // balance — never show a computed number from nothing.
+      if (a.balance === null || a.balance === undefined) {
+        note.textContent = 'After approval, ' + a.nickname + ' records this transaction. Its balance is not set yet — it stays unknown'
+          + (draft.availableBalance != null
+            ? ' unless the bank\'s available balance (' + fmtRs(draft.availableBalance) + ') sets it.' : ' unless this SMS states an available balance.')
+          + ' Paste another SMS or upload a statement to set it.';
+        return;
+      }
       var after = draft.direction === 'debit' ? a.balance - draft.amount : a.balance + draft.amount;
       note.textContent = 'After approval, ' + a.nickname + ' will show ' + fmtRs(after)
         + (draft.availableBalance != null && draft.availableBalance !== after
@@ -1021,10 +1084,25 @@
         merchant: draft.merchant, date: draft.date, source: 'sms',
       });
       VaultModel.approveTransaction(state.vault, txn.id);
+      // Baseline from the bank (Phase 3.5): the review path never
+      // bank-confirms (only the direct match does), but if the balance was
+      // unknown and this SMS states an available balance, that number IS
+      // the balance now.
+      var account = VaultModel.findAccount(state.vault, accountId);
+      var baselineSet = false;
+      if (account && (account.balance === null || account.balance === undefined) && draft.availableBalance != null) {
+        VaultModel.setBaselineFromBank(state.vault, accountId, draft.availableBalance, 'sms');
+        baselineSet = true;
+      }
       await persist();
       $('sms-review').innerHTML = '';
       $('sms-text').value = '';
       state.smsDraft = null;
+      if (baselineSet) {
+        var res = $('intel-result');
+        res.innerHTML = '<div class="ok">Balance set from this SMS: ' + esc(fmtRs(account.balance)) + '.</div>';
+        show(res);
+      }
       render();
     } catch (e) {
       $('sms-error').textContent = e.message;
@@ -1038,7 +1116,8 @@
     await persist();
     render();
     var res = $('intel-result');
-    res.innerHTML = '<div class="big">Undone — balance back to ' + esc(fmtRs(out.balance)) + '.</div>';
+    res.innerHTML = '<div class="big">Undone — balance ' + (out.balance === null || out.balance === undefined
+      ? 'still not set.' : 'back to ' + esc(fmtRs(out.balance)) + '.') + '</div>';
     show(res);
   }
 
@@ -1327,6 +1406,7 @@
       $(id).addEventListener('change', function () {
         if (state.addProof) {
           state.addProof = null;
+          state.addProofBalance = null;
           $('add-proof').value = '';
           $('add-proof-status').textContent = 'Card details changed — upload the statement again.';
           hide($('add-proof-preview'));
