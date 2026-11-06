@@ -136,21 +136,42 @@ async function main() {
   check('Model: empty vault shape', vault.v === 1 && Array.isArray(vault.accounts)
     && Array.isArray(vault.transactions) && Array.isArray(vault.notifications)
     && vault.settings.lowBalanceThreshold === 5000, vault);
-  const hbl = M.createAccount(vault, { provider: 'HBL', type: 'debit', nickname: 'HBL Salary', last4: '1234', balance: 150000 });
-  check('Model: account created with id + starting balance', !!hbl.id && hbl.balance === 150000 && hbl.startingBalance === 150000, hbl);
-  check('Model: bad provider rejected', M.validateAccount({ provider: 'FakeBank', type: 'debit', nickname: 'X', last4: '1234', balance: 0 }).length > 0);
-  check('Model: bad type rejected', M.validateAccount({ provider: 'HBL', type: 'gold', nickname: 'X', last4: '1234', balance: 0 }).length > 0);
-  check('Model: empty nickname rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: '  ', last4: '1234', balance: 0 }).length > 0);
-  check('Model: 3-digit last4 rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '123', balance: 0 }).length > 0);
-  check('Model: 5-digit last4 rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '12345', balance: 0 }).length > 0);
-  check('Model: letters in last4 rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '12a4', balance: 0 }).length > 0);
+  const hbl = M.createAccount(vault, { provider: 'HBL', type: 'debit', nickname: 'HBL Salary', last4: '1234' });
+  check('Model: account created with id, null balance (unknown) + Not confirmed',
+    !!hbl.id && hbl.balance === null && hbl.startingBalance === null && hbl.confirmedBy === null, hbl);
+  check('Model: bad provider rejected', M.validateAccount({ provider: 'FakeBank', type: 'debit', nickname: 'X', last4: '1234' }).length > 0);
+  check('Model: bad type rejected', M.validateAccount({ provider: 'HBL', type: 'gold', nickname: 'X', last4: '1234' }).length > 0);
+  check('Model: empty nickname rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: '  ', last4: '1234' }).length > 0);
+  check('Model: 3-digit last4 rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '123' }).length > 0);
+  check('Model: 5-digit last4 rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '12345' }).length > 0);
+  check('Model: letters in last4 rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '12a4' }).length > 0);
   check('Model: full 16-digit number in last4 rejected',
-    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '0000000000000000', balance: 0 }).length > 0);
+    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '0000000000000000' }).length > 0);
   check('Model: full 16-digit number in nickname rejected',
-    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'card 0000000000000000', last4: '4454', balance: 0 }).length > 0);
+    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'card 0000000000000000', last4: '4454' }).length > 0);
   check('Model: CVV key rejected',
-    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '1234', balance: 0, cvv: '123' }).length > 0);
+    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '1234', cvv: '123' }).length > 0);
+  // No typed balances (Phase 3.5): a balance supplied at creation is
+  // REJECTED — never silently ignored. NaN, 0, negative: all rejected.
+  check('Model: balance supplied at creation is rejected (VALIDATION)',
+    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '9999', balance: 150000 }).length > 0
+    && M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '9999', balance: 0 }).length > 0
+    && M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '9999', balance: -100 }).length > 0
+    && throwsCode(() => M.createAccount(vault, { provider: 'HBL', type: 'debit', nickname: 'X', last4: '9999', balance: 150000 }), 'VALIDATION'));
   check('Model: NaN balance rejected', M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '1234', balance: NaN }).length > 0);
+  // A bank SMS sets the baseline (Phase 3.5): the HBL account now has a
+  // real, bank-stated balance of Rs 150,000 to run the engine tests on.
+  M.setBaselineFromBank(vault, hbl.id, 150000, 'sms');
+  check('Model: baseline from bank sets balance + startingBalance',
+    hbl.balance === 150000 && hbl.startingBalance === 150000, hbl);
+  check('Model: baseline from a non-bank source is rejected',
+    throwsCode(() => M.setBaselineFromBank(vault, hbl.id, 150000, 'typed'), 'VALIDATION'));
+  check('Model: baseline with a non-number is rejected',
+    throwsCode(() => M.setBaselineFromBank(vault, hbl.id, 'lots', 'sms'), 'VALIDATION'));
+  check('Model: isBalanceKnown — null is unknown, 0 is known',
+    M.isBalanceKnown(hbl) === true && M.isBalanceKnown({ balance: null }) === false && M.isBalanceKnown({ balance: 0 }) === true);
+  check('Model: same last4 on a different provider is fine',
+    M.createAccount(vault, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '1234' }).provider === 'JazzCash');
   check('Model: sensitive scan flags 16 digits, not 4', M.containsSensitiveValue('0000000000000000') === true && M.containsSensitiveValue('1234') === false);
   // Balance engine — hand-computed cases.
   const t1 = M.addTransaction(vault, { accountId: hbl.id, amount: 2500, direction: 'debit', merchant: 'Imtiaz Super Market', category: 'food', date: '2026-11-06', source: 'manual' });
@@ -175,7 +196,8 @@ async function main() {
   check('Model: bad date rejected', M.validateTransaction({ accountId: hbl.id, amount: 5, direction: 'debit', date: '06/11/2026', source: 'manual' }).length > 0);
   check('Model: bad direction rejected', M.validateTransaction({ accountId: hbl.id, amount: 5, direction: 'spent', date: '2026-11-06', source: 'manual' }).length > 0);
   // Notifications + low-balance crossing.
-  const ez = M.createAccount(vault, { provider: 'Easypaisa', type: 'wallet', nickname: 'Easypaisa daily', last4: '9876', balance: 6000 });
+  const ez = M.createAccount(vault, { provider: 'Easypaisa', type: 'wallet', nickname: 'Easypaisa daily', last4: '9876' });
+  M.setBaselineFromBank(vault, ez.id, 6000, 'sms');
   check('Model: notifications recorded for approvals', vault.notifications.some((n) => n.kind === 'transaction' && n.text.includes('Imtiaz')));
   const t4 = M.addTransaction(vault, { accountId: ez.id, amount: 2000, direction: 'debit', merchant: 'Utility bill', date: '2026-11-06', source: 'manual' });
   M.approveTransaction(vault, t4.id);
@@ -185,10 +207,14 @@ async function main() {
   M.approveTransaction(vault, t5.id);
   check('Model: no duplicate low-balance alert while already below',
     vault.notifications.filter((n) => n.kind === 'low-balance').length === 1);
-  // Totals + reconcile.
+  // Totals + reconcile. The JazzCash card has no balance yet, so the total
+  // counts only the two known balances and says one is not set yet.
   const tot = M.totals(vault);
-  check('Model: totals reconcile (147500 + 3500 = 151000)', tot.total === 151000 && tot.byProvider.HBL === 147500 && tot.byProvider.Easypaisa === 3500, tot);
+  check('Model: totals reconcile (147500 + 3500 = 151000) + unknown counted',
+    tot.total === 151000 && tot.byProvider.HBL === 147500 && tot.byProvider.Easypaisa === 3500 && tot.unknownCount === 1, tot);
   check('Model: reconcile clean after real operations', M.reconcile(vault).ok === true);
+  check('Model: reconcile lists unknown-balance accounts, not mismatches',
+    M.reconcile(vault).unknown.length === 1 && M.reconcile(vault).mismatches.length === 0, M.reconcile(vault));
   hbl.balance = 999999; // corrupt one balance by hand
   const rec = M.reconcile(vault);
   check('Model: reconcile catches a corrupted balance', rec.ok === false && rec.mismatches.length === 1 && rec.mismatches[0].computed === 147500, rec);
@@ -240,7 +266,8 @@ async function main() {
   check('SMS date: 2-digit year understood', S.parseDateStr('on 06-Nov-26') === '2026-11-06');
   // SMS draft flows through the model: approve updates the balance.
   const smsVault = M.emptyVault();
-  const smsAcct = M.createAccount(smsVault, { provider: 'HBL', type: 'debit', nickname: 'HBL Salary', last4: '1234', balance: 150000 });
+  const smsAcct = M.createAccount(smsVault, { provider: 'HBL', type: 'debit', nickname: 'HBL Salary', last4: '1234' });
+  M.setBaselineFromBank(smsVault, smsAcct.id, 150000, 'sms');
   const draft = S.parseSms(SMS_CASES[0][1]);
   const smsTxn = M.addTransaction(smsVault, { accountId: smsAcct.id, amount: draft.amount, direction: draft.direction, merchant: draft.merchant, date: draft.date, source: 'sms' });
   check('SMS flow: draft starts pending, balance untouched', smsTxn.status === 'pending' && smsAcct.balance === 150000);
@@ -275,7 +302,8 @@ async function main() {
   check('CSV: missing date/amount mapping rejected', C.rowsToTransactions(parsed, { date: '', amount: 'Amount', merchant: '', direction: '' }, 'acct1').errors.length === 1);
   // Dedupe.
   const dupVault = M.emptyVault();
-  const dupAcct = M.createAccount(dupVault, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '1234', balance: 150000 });
+  const dupAcct = M.createAccount(dupVault, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '1234' });
+  M.setBaselineFromBank(dupVault, dupAcct.id, 150000, 'sms');
   const existing = M.addTransaction(dupVault, { accountId: dupAcct.id, amount: 2500, direction: 'debit', merchant: 'IMTIAZ SUPER MARKET', date: '2026-11-06', source: 'manual' });
   M.approveTransaction(dupVault, existing.id);
   const marked = C.markDuplicates(dupVault, [
@@ -289,7 +317,7 @@ async function main() {
 
   // ---- §4. Encrypted backup ----
   const backupVault = M.emptyVault();
-  M.createAccount(backupVault, { provider: 'JazzCash', type: 'wallet', nickname: 'JazzCash daily', last4: '5555', balance: 12500 });
+  M.createAccount(backupVault, { provider: 'JazzCash', type: 'wallet', nickname: 'JazzCash daily', last4: '5555' });
   const made = await V.createVault('112233', 'backup-pass', backupVault);
   const backup = V.createBackup(made.envelope);
   check('Backup: file shape (app/version/date/envelope)', backup.app === 'personal-card-vault'
@@ -496,9 +524,9 @@ async function main() {
   check('Intel: extractLast4 reads AC 1234', S.extractLast4('from AC 1234 on 06-Nov') === '1234');
   check('Intel: extractLast4 reads ending 1234', S.extractLast4('your account ending 1234') === '1234');
   const intelVault = M.emptyVault();
-  M.createAccount(intelVault, { provider: 'JazzCash', type: 'wallet', nickname: 'JC daily', last4: '1234', balance: 50000 });
-  M.createAccount(intelVault, { provider: 'HBL', type: 'debit', nickname: 'HBL main', last4: '1234', balance: 150000 });
-  M.createAccount(intelVault, { provider: 'Easypaisa', type: 'wallet', nickname: 'EP', last4: '5678', balance: 20000 });
+  M.createAccount(intelVault, { provider: 'JazzCash', type: 'wallet', nickname: 'JC daily', last4: '1234' });
+  M.createAccount(intelVault, { provider: 'HBL', type: 'debit', nickname: 'HBL main', last4: '1234' });
+  M.createAccount(intelVault, { provider: 'Easypaisa', type: 'wallet', nickname: 'EP', last4: '5678' });
   const jcDraft = S.parseSms('Rs 2,500.00 debited from your JazzCash account ••••1234 at Daraz on 06-Nov-2026. Available balance Rs 47,500.00');
   check('Intel: SMS parses provider + last-4 + amount + balance',
     !!jcDraft && jcDraft.provider === 'JazzCash' && jcDraft.last4 === '1234'
@@ -524,14 +552,18 @@ async function main() {
     })());
   const jcAccount = I.findIntelMatch(intelVault.accounts, 'JazzCash', '1234').account;
   const applied = I.applyIntelUpdate(intelVault, jcDraft, jcAccount);
+  // Phase 3.5: the SMS carried an available balance and the account's
+  // balance was unknown — so the SMS SET the baseline (47,500), and the
+  // starting balance back-computes to 50,000 (the balance before the debit).
   check('Intel: debit SMS with a matching last-4 updates that account directly',
-    applied.newBalance === 47500 && applied.prevBalance === 50000
+    applied.newBalance === 47500 && applied.prevBalance === null && applied.baselineSet === true
+    && jcAccount.startingBalance === 50000
     && intelVault.transactions.length === 1 && intelVault.transactions[0].status === 'approved');
   check('Intel: the update adds a transaction row + a notification',
     intelVault.notifications.length === 1 && intelVault.notifications[0].kind === 'transaction');
-  const resText = I.intelResultText(jcAccount, jcDraft, applied.prevBalance, applied.newBalance);
+  const resText = I.intelResultText(jcAccount, jcDraft, applied.prevBalance, applied.newBalance, applied.baselineSet);
   check('Intel: result line reads like the spec',
-    resText.line === 'JazzCash ••1234 updated: −Rs 2,500 → new balance Rs 47,500');
+    resText.line === 'JazzCash ••1234 updated: −Rs 2,500 → new balance Rs 47,500 · balance set from this SMS');
   check('Intel: available-balance cross-check is shown (matches)',
     resText.cross === 'Bank says available balance Rs 47,500 — matches the vault.');
   const undone = I.undoIntelUpdate(intelVault, applied.txn.id, applied.notifId);
@@ -541,7 +573,14 @@ async function main() {
   const creditDraft = S.parseSms('Rs 10,000.00 credited to your Easypaisa account ending 5678 on 06-Nov-2026.');
   const epAccount = I.findIntelMatch(intelVault.accounts, 'Easypaisa', '5678').account;
   const appliedCr = I.applyIntelUpdate(intelVault, creditDraft, epAccount);
-  check('Intel: credit SMS adds to the balance', appliedCr.newBalance === 30000);
+  // Phase 3.5: this SMS stated no available balance, so the balance stays
+  // unknown — the transaction is recorded, nothing is invented.
+  check('Intel: credit SMS on an unknown-balance account records the transaction, balance stays unknown',
+    appliedCr.newBalance === null && appliedCr.baselineSet === false
+    && intelVault.transactions.length === 1 && intelVault.transactions[0].status === 'approved');
+  check('Intel: result line says the balance is still not set',
+    I.intelResultText(epAccount, creditDraft, appliedCr.prevBalance, appliedCr.newBalance, appliedCr.baselineSet).line
+      === 'Easypaisa ••5678 updated: +Rs 10,000 → balance still not set — this SMS had no available balance. Paste another SMS or upload a statement.');
   const crossDiff = I.intelResultText(epAccount, { ...creditDraft, availableBalance: 30500 }, 20000, 30000);
   check('Intel: cross-check flags a bank balance that differs',
     crossDiff.cross.includes('Rs 500 more than the vault shows'));
@@ -787,9 +826,9 @@ async function main() {
   check('Verify: same provider + last-4 cannot be added twice (error names the card)',
     (() => {
       const v = M.emptyVault();
-      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL main', last4: '1234', balance: 1000 });
+      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL main', last4: '1234' });
       try {
-        M.createAccount(v, { provider: 'UBL', type: 'credit', nickname: 'UBL other', last4: '1234', balance: 0 });
+        M.createAccount(v, { provider: 'UBL', type: 'credit', nickname: 'UBL other', last4: '1234' });
         return false;
       } catch (e) {
         return e.code === 'VALIDATION' && e.message.includes('UBL') && e.message.includes('1234');
@@ -798,87 +837,110 @@ async function main() {
   check('Verify: same last-4 under a different provider is allowed (different banks can share it)',
     (() => {
       const v = M.emptyVault();
-      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
-      const second = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '1234', balance: 500 });
+      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
+      const second = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '1234' });
       return !!second && v.accounts.length === 2;
     })());
   check('Verify: same provider + a different last-4 is allowed',
     (() => {
       const v = M.emptyVault();
-      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL 1', last4: '1234', balance: 1000 });
-      const second = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL 2', last4: '5678', balance: 500 });
+      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL 1', last4: '1234' });
+      const second = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL 2', last4: '5678' });
       return !!second && v.accounts.length === 2;
     })());
-  check('Verify: negative balance rejected for debit / wallet / bank',
+  // No typed balances (Phase 3.5): ANY balance supplied at creation is
+  // rejected — debit, wallet, bank and credit alike. A negative balance
+  // (money owed on a credit card) can only come from the bank, via
+  // setBaselineFromBank — never from the user's hand.
+  check('Verify: any balance supplied at creation is rejected, for every account type',
     M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '1234', balance: -100 }).length > 0
     && M.validateAccount({ provider: 'JazzCash', type: 'wallet', nickname: 'X', last4: '1234', balance: -100 }).length > 0
-    && M.validateAccount({ provider: 'HBL', type: 'bank', nickname: 'X', last4: '1234', balance: -100 }).length > 0);
-  check('Verify: negative balance allowed for a credit card (money owed)',
-    M.validateAccount({ provider: 'HBL', type: 'credit', nickname: 'X', last4: '1234', balance: -5000 }).length === 0);
-  check('Verify: a new account starts unconfirmed (confirmedBy null)',
+    && M.validateAccount({ provider: 'HBL', type: 'bank', nickname: 'X', last4: '1234', balance: -100 }).length > 0
+    && M.validateAccount({ provider: 'HBL', type: 'credit', nickname: 'X', last4: '1234', balance: -5000 }).length > 0);
+  check('Verify: a negative baseline from the bank is allowed for a credit card (money owed)',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0 });
-      return a.confirmedBy === null && M.isBankConfirmed(a) === false;
+      const a = M.createAccount(v, { provider: 'HBL', type: 'credit', nickname: 'HBL Credit', last4: '1234' });
+      M.setBaselineFromBank(v, a.id, -5000, 'sms');
+      return a.balance === -5000 && a.startingBalance === -5000;
+    })());
+  check('Verify: a new account starts unconfirmed (confirmedBy null) with no balance',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
+      return a.confirmedBy === null && M.isBankConfirmed(a) === false && a.balance === null;
     })());
 
-  // ---- §9d (cont). Phase 3.1, Step 2: bank-confirmed status ----
+  // ---- §9d (cont). Verification rule (Hashir, 2026-11-06): the
+  // "Bank-confirmed" badge is earned ONLY by a total-amount screenshot or
+  // a bank statement PDF — NEVER by an SMS. An SMS may set the balance
+  // (it is bank data) but it never confirms the card.
   const intelJs = fs.readFileSync(path.join(__dirname, 'public', 'intel.js'), 'utf8');
   const confVault = M.emptyVault();
-  M.createAccount(confVault, { provider: 'JazzCash', type: 'wallet', nickname: 'JC daily', last4: '1234', balance: 50000 });
+  M.createAccount(confVault, { provider: 'JazzCash', type: 'wallet', nickname: 'JC daily', last4: '1234' });
   const confDraft = S.parseSms('Rs 2,500.00 debited from your JazzCash account ••••1234 at Daraz on 06-Nov-2026. Available balance Rs 47,500.00');
   const confAcct = I.findIntelMatch(confVault.accounts, 'JazzCash', '1234').account;
-  check('Verify: a real bank-SMS direct match marks the account bank-confirmed with a date',
+  check('Verify: a real bank-SMS direct match sets the balance but does NOT confirm the card',
     (() => {
       const out = I.applyIntelUpdate(confVault, confDraft, confAcct);
-      return out.confirmed === true && confAcct.confirmedBy && confAcct.confirmedBy.source === 'bank-sms'
-        && typeof confAcct.confirmedBy.at === 'string' && !isNaN(Date.parse(confAcct.confirmedBy.at))
-        && M.isBankConfirmed(confAcct) === true && out.newBalance === 47500;
+      return out.newBalance === 47500 && out.baselineSet === true
+        && out.confirmed === undefined // no confirmation is ever returned
+        && confAcct.confirmedBy === null && M.isBankConfirmed(confAcct) === false
+        && K.confirmationBadge(confAcct).includes('Not confirmed yet');
     })());
-  check('Verify: Undo reverses the balance only — the confirmation stays (the SMS was real)',
+  check('Verify: Undo reverses the balance; nothing was confirmed, so nothing stays confirmed',
     (() => {
       const out = I.undoIntelUpdate(confVault, confVault.transactions[0].id, confVault.notifications[0] ? confVault.notifications[0].id : null);
       return out.balance === 50000 && confVault.transactions.length === 0
-        && M.isBankConfirmed(confAcct) === true && confAcct.confirmedBy.source === 'bank-sms';
+        && M.isBankConfirmed(confAcct) === false && confAcct.confirmedBy === null;
     })());
-  check('Verify: a second SMS does not re-stamp the confirmation (first date kept)',
+  check('Verify: SMSs never stamp a confirmation — two SMSs, still unconfirmed, balance unknown',
     (() => {
       const v = M.emptyVault();
-      M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '4321', balance: 10000 });
+      M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '4321' });
       const a = v.accounts[0];
       const d1 = S.parseSms('Rs 500.00 debited from your HBL account ••••4321 on 06-Nov-2026.');
       const d2 = S.parseSms('Rs 200.00 debited from your HBL account ••••4321 on 06-Nov-2026.');
       const o1 = I.applyIntelUpdate(v, d1, a);
-      const firstAt = a.confirmedBy.at;
       const o2 = I.applyIntelUpdate(v, d2, a);
-      return o1.confirmed === true && o2.confirmed === false && a.confirmedBy.at === firstAt;
+      // Neither SMS stated an available balance, so the balance stays
+      // unknown — and neither SMS confirmed the card.
+      return o1.baselineSet === false && o2.baselineSet === false
+        && a.confirmedBy === null && M.isBankConfirmed(a) === false && a.balance === null;
     })());
   check('Verify: manual add and manual/CSV transactions never confirm an account',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '9999', balance: 10000 });
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '9999' });
       const t1 = M.addTransaction(v, { accountId: a.id, amount: 500, direction: 'debit', merchant: 'Shop', date: '2026-11-06', source: 'manual' });
       M.approveTransaction(v, t1.id);
       const t2 = M.addTransaction(v, { accountId: a.id, amount: 1000, direction: 'credit', merchant: 'Salary', date: '2026-11-06', source: 'csv' });
       M.approveTransaction(v, t2.id);
-      return M.isBankConfirmed(a) === false && a.confirmedBy === null;
+      // Approving transactions on an unknown-balance account leaves it
+      // unknown — a transaction cannot move a number that was never set.
+      return M.isBankConfirmed(a) === false && a.confirmedBy === null && a.balance === null;
     })());
   check('Verify: an old vault without confirmedBy loads as unconfirmed',
     (() => {
       const v = M.emptyVault();
       v.accounts.push({ id: 'old1', provider: 'UBL', type: 'debit', nickname: 'Old', last4: '1111', balance: 100, startingBalance: 100, createdAt: '2026-11-06T00:00:00.000Z' });
+      // An old vault account with no balance fields at all loads as unknown.
+      v.accounts.push({ id: 'old2', provider: 'HBL', type: 'debit', nickname: 'Older', last4: '2222', createdAt: '2026-11-06T00:00:00.000Z' });
       M.migrateVault(v);
-      return v.accounts[0].confirmedBy === null && M.isBankConfirmed(v.accounts[0]) === false;
+      return v.accounts[0].confirmedBy === null && M.isBankConfirmed(v.accounts[0]) === false
+        && v.accounts[0].balance === 100 && v.accounts[1].balance === null && v.accounts[1].startingBalance === null;
     })());
-  check('Verify: only the Intelligence direct-match path can confirm (review/CSV/manual never call it)',
-    intelJs.includes('markAccountBankConfirmed') && !appJs.includes('markAccountBankConfirmed'));
+  check('Verify: NO path grants Bank-confirmed from an SMS — the marker is reserved for screenshot/statement verification',
+    !intelJs.includes('markAccountBankConfirmed') && !appJs.includes('markAccountBankConfirmed')
+    && !appJs.includes('Bank-confirmed — this SMS'));
   check('Verify: cards show the bank-confirmed badge, unconfirmed cards the muted badge',
     K.buildCardVisual({ id: 'c1', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: { source: 'bank-sms', at: '2026-11-06T00:00:00.000Z' } }, {}).includes('✓ Bank-confirmed')
     && K.buildCardVisual({ id: 'c2', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: null }, {}).includes('Not confirmed yet')
     && K.confirmationBadge({ confirmedBy: { source: 'bank-sms', at: 'x' } }).includes('Bank-confirmed')
     && appJs.includes('Cards.confirmationBadge(a)'));
-  check('Verify: the Add page carries the honest note',
-    html.includes('id="add-honest-note"') && html.includes('We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan.'));
+  check('Verify: the Add page carries the honest note (incl. SMS never verifies)',
+    html.includes('id="add-honest-note"') && html.includes('We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan.')
+    && html.includes('A bank SMS can set the balance, but it never verifies the card'));
   check('Verify: the badge styles exist',
     css.includes('.cv-confirmed') && css.includes('.sum-row .pill'));
 
@@ -892,7 +954,7 @@ async function main() {
   check('Rename: empty, over-long or sensitive nicknames rejected',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
       return throwsCode(function () { M.renameAccount(v, a.id, '  '); }, 'VALIDATION')
         && throwsCode(function () { M.renameAccount(v, a.id, 'x'.repeat(41)); }, 'VALIDATION')
         && throwsCode(function () { M.renameAccount(v, a.id, 'card 0000000000000000'); }, 'VALIDATION');
@@ -900,21 +962,23 @@ async function main() {
   check('Rename: only the nickname changes — balance, type, proof and confirmation untouched, reconcile clean',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
       M.renameAccount(v, a.id, 'UBL Salary');
-      return a.nickname === 'UBL Salary' && a.balance === 1000 && a.type === 'debit'
-        && a.startingBalance === 1000 && a.provider === 'UBL' && a.last4 === '1234'
+      return a.nickname === 'UBL Salary' && a.balance === null && a.type === 'debit'
+        && a.startingBalance === null && a.provider === 'UBL' && a.last4 === '1234'
         && v.transactions.length === 0 && M.reconcile(v).ok;
     })());
   check('Rename: a bank-confirmed card keeps its badge after a rename',
     (() => {
       const v = M.emptyVault();
-      M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '1234', balance: 50000 });
+      M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '1234' });
       const a = v.accounts[0];
-      const d = S.parseSms('Rs 2,500.00 debited from your JazzCash account ••••1234 on 06-Nov-2026.');
-      I.applyIntelUpdate(v, d, a);
+      // Hand-set: an old-vault record from before the 2026-11-06 rule
+      // change (an SMS never confirms now — this only tests that a rename
+      // preserves whatever confirmation the card already carries).
+      a.confirmedBy = { source: 'bank-sms', at: '2026-11-06T00:00:00.000Z' };
       M.renameAccount(v, a.id, 'JC daily');
-      return M.isBankConfirmed(a) === true && a.nickname === 'JC daily' && a.balance === 47500;
+      return M.isBankConfirmed(a) === true && a.nickname === 'JC daily' && a.balance === null;
     })());
   check('Audit: NO model function lets a hand edit change a balance or a type (updateAccount is gone)',
     typeof M.updateAccount === 'undefined'
@@ -926,9 +990,9 @@ async function main() {
   check('Reorder: up/down swap neighbours; ends are a no-op; unknown id rejected',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 1 });
-      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 2 });
-      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333', balance: 3 });
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111' });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222' });
+      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333' });
       const topNoop = M.moveAccount(v, a.id, 'up') === false;
       const bottomNoop = M.moveAccount(v, c.id, 'down') === false;
       const moved = M.moveAccount(v, c.id, 'up') === true;
@@ -942,8 +1006,8 @@ async function main() {
   check('Delete: removes the account AND its transactions; reconcile stays clean; unknown id rejected',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 10000 });
-      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 5000 });
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111' });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222' });
       const t = M.addTransaction(v, { accountId: a.id, amount: 500, direction: 'debit', merchant: 'Shop', date: '2026-11-06', source: 'manual' });
       M.approveTransaction(v, t.id);
       M.addTransaction(v, { accountId: b.id, amount: 100, direction: 'debit', merchant: 'Shop', date: '2026-11-06', source: 'manual' });
@@ -956,7 +1020,7 @@ async function main() {
   check('Delete: removing the last card leaves an empty vault',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 100 });
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111' });
       M.deleteAccount(v, a.id);
       return v.accounts.length === 0 && M.totals(v).count === 0 && M.reconcile(v).ok;
     })());
@@ -1064,34 +1128,35 @@ async function main() {
   check('Proof: a new card with no proof is "Not confirmed yet"; a proof record is stored on the card',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, proof: proofRecord('match') });
-      const b = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '5678', balance: 0 });
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', proof: proofRecord('match') });
+      const b = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '5678' });
       return a.proof && a.proof.status === 'match' && b.proof === null
         && K.confirmationBadge(b).includes('Not confirmed yet');
     })());
   check('Proof: a bad proof record is never stored (wrong kind / status / data URL)',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, proof: { kind: 'txt', name: 'x', dataUrl: 'data:text/plain;base64,aGVsbG8=', status: 'match' } });
-      const b = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '5678', balance: 0, proof: { kind: 'pdf', name: 'x', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', status: 'verified' } });
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', proof: { kind: 'txt', name: 'x', dataUrl: 'data:text/plain;base64,aGVsbG8=', status: 'match' } });
+      const b = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '5678', proof: { kind: 'pdf', name: 'x', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', status: 'verified' } });
       return a.proof === null && b.proof === null;
     })());
   check('Proof: removing proof clears the status back to unconfirmed — unless the card is bank-confirmed',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, proof: proofRecord('match') });
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', proof: proofRecord('match') });
       M.removeProof(v, a.id);
       const backToUnconfirmed = a.proof === null && K.confirmationBadge(a).includes('Not confirmed yet');
-      const b = M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '9999', balance: 50000, proof: proofRecord('match') });
-      const d = S.parseSms('Rs 2,500.00 debited from your JazzCash account ••••9999 on 06-Nov-2026.');
-      I.applyIntelUpdate(v, d, b);
+      const b = M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '9999', proof: proofRecord('match') });
+      // Hand-set: an old-vault bank-confirmed record from before the
+      // 2026-11-06 rule change (an SMS never confirms now).
+      b.confirmedBy = { source: 'bank-sms', at: '2026-11-06T00:00:00.000Z' };
       M.removeProof(v, b.id);
       return backToUnconfirmed && b.proof === null && K.confirmationBadge(b).includes('✓ Bank-confirmed');
     })());
   check('Proof: renaming a card keeps its proof (provider/last-4 cannot change, so proof stays attached)',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000, proof: proofRecord('match') });
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', proof: proofRecord('match') });
       M.renameAccount(v, a.id, 'UBL Salary');
       return a.proof && a.proof.status === 'match' && a.nickname === 'UBL Salary' && M.reconcile(v).ok;
     })());
@@ -1102,7 +1167,7 @@ async function main() {
       M.migrateVault(v);
       if (v.accounts[0].proof !== null || !K.confirmationBadge(v.accounts[0]).includes('Not confirmed yet')) return false;
       const w = M.emptyVault();
-      M.createAccount(w, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000, proof: proofRecord('self-checked') });
+      M.createAccount(w, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', proof: proofRecord('self-checked') });
       const made = await V.createVault('123456', 'my secret', w);
       const back = await V.decryptVault(made.key, made.envelope);
       return back.accounts[0].proof && back.accounts[0].proof.status === 'self-checked'
@@ -1151,35 +1216,47 @@ async function main() {
       return done === M.todayStr() && v.lastReconcileAt === M.todayStr() && v.lastReconcileSkipped === 2
         && M.monthlyCheckDue(v) === false;
     })());
-  check('Monthly: only bank-confirmed or statement-matched accounts are ready; the rest are pending or skipped',
+  check('Monthly: only statement-matched (or bank-confirmed) accounts with a known balance are ready; an SMS alone is never enough',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 1000 });
-      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 2000, proof: proofRecord('match') });
-      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333', balance: 3000, proof: proofRecord('self-checked') });
-      const d = S.parseSms('Rs 100.00 debited from your HBL account ••••1111 on 06-Nov-2026.');
-      I.applyIntelUpdate(v, d, a);
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', proof: proofRecord('match') });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', proof: proofRecord('match') });
+      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333', proof: proofRecord('self-checked') });
+      const d = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'D', last4: '4444' });
+      // A and B: their statements matched AND set the balance — ready. C:
+      // self-checked screenshot, no balance — not ready. D: a real bank SMS
+      // set the balance, but an SMS never verifies the card — not ready.
+      M.setBaselineFromBank(v, a.id, 1000, 'statement');
+      M.setBaselineFromBank(v, b.id, 2000, 'statement');
+      const sms = S.parseSms('Rs 100.00 debited from your HBL account ••••4444 on 06-Nov-2026. Available balance Rs 900.00');
+      I.applyIntelUpdate(v, sms, d);
       const none = M.monthlyCheckStatus(v, {});
-      const skipped = M.monthlyCheckStatus(v, { [c.id]: true });
+      const oneSkipped = M.monthlyCheckStatus(v, { [c.id]: true });
+      const bothSkipped = M.monthlyCheckStatus(v, { [c.id]: true, [d.id]: true });
       return M.accountCheckReady(a) === true && M.accountCheckReady(b) === true
-        && M.accountCheckReady(c) === false && none.ready === false && none.pending.length === 1
-        && none.pending[0].id === c.id && skipped.ready === true && skipped.skippedCount === 1;
+        && M.accountCheckReady(c) === false && M.accountCheckReady(d) === false
+        && none.ready === false && none.pending.length === 2
+        && oneSkipped.ready === false && bothSkipped.ready === true && bothSkipped.skippedCount === 2;
     })());
-  check('Monthly: last confirmed date comes from the bank SMS first, else the statement, else null',
+  check('Monthly: last confirmed date comes from the confirmation record first, else the statement, else null — an SMS alone sets no date',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 1000 });
-      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 2000, proof: proofRecord('match') });
-      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333', balance: 3000 });
-      const d = S.parseSms('Rs 100.00 debited from your HBL account ••••1111 on 06-Nov-2026.');
-      I.applyIntelUpdate(v, d, a);
-      return M.lastConfirmedAt(a) === M.todayStr() && M.lastConfirmedAt(b) === '2026-11-06'
-        && M.lastConfirmedAt(c) === null;
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111' });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', proof: proofRecord('match') });
+      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333' });
+      const d = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'D', last4: '4444' });
+      const sms = S.parseSms('Rs 100.00 debited from your HBL account ••••1111 on 06-Nov-2026. Available balance Rs 900.00');
+      I.applyIntelUpdate(v, sms, a);
+      // Hand-set: an old-vault bank-confirmed record from before the
+      // 2026-11-06 rule change — the record still carries its date.
+      d.confirmedBy = { source: 'bank-sms', at: '2026-11-05T00:00:00.000Z' };
+      return M.lastConfirmedAt(a) === null && M.lastConfirmedAt(b) === '2026-11-06'
+        && M.lastConfirmedAt(c) === null && M.lastConfirmedAt(d) === '2026-11-05';
     })());
   check('Monthly: attachProof stores a valid record, rejects a bad one and an unknown account',
     (() => {
       const v = M.emptyVault();
-      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
       M.attachProof(v, a.id, proofRecord('match'));
       const attached = a.proof && a.proof.status === 'match';
       return attached
@@ -1221,6 +1298,101 @@ async function main() {
   check('Monthly UI: the banner hides once the check is marked done (render toggles on monthlyCheckDue)',
     appJs.includes("monthly-banner').classList.toggle('hidden', !due")
     && appJs.includes("monthly-done-line').classList.toggle('hidden', due"));
+
+  // ---- §9h. Phase 3.5: the baseline comes from the bank (statement) ----
+  check('Statement balance: one clear "Available Balance: Rs 47,500" is read',
+    (() => {
+      const r = P.extractStatementBalance('UBL Bank Statement. Available Balance: Rs 47,500.00');
+      return r.status === 'one' && r.amount === 47500 && r.label === 'Available Balance' && r.match.includes('47,500');
+    })());
+  check('Statement balance: "Closing Balance PKR 12,300" is read',
+    (() => {
+      const r = P.extractStatementBalance('Closing Balance PKR 12,300');
+      return r.status === 'one' && r.amount === 12300 && r.label === 'Closing Balance';
+    })());
+  check('Statement balance: a plain "Balance: Rs 8,750" is read',
+    (() => {
+      const r = P.extractStatementBalance('Your Balance: Rs 8,750.00');
+      return r.status === 'one' && r.amount === 8750 && r.label === 'Balance';
+    })());
+  check('Statement balance: a date between the label and the amount is crossed',
+    P.extractStatementBalance('Balance as on 06-Nov-2026: Rs 47,500.00').amount === 47500);
+  check('Statement balance: a date alone is NOT a balance (Rs 6 is never invented)',
+    P.extractStatementBalance('Balance as on 06-Nov-2026').status === 'none');
+  check('Statement balance: two different balances are ambiguous — nothing is set',
+    (() => {
+      const r = P.extractStatementBalance('Available balance Rs 47,500. Closing balance Rs 45,000');
+      return r.status === 'ambiguous' && r.amounts.length === 2 && r.amounts.includes(47500) && r.amounts.includes(45000);
+    })());
+  check('Statement balance: no balance mentioned at all is none',
+    P.extractStatementBalance('No balance mentioned here at all').status === 'none');
+  check('Statement balance: opening / minimum balances are never counted',
+    P.extractStatementBalance('Opening balance Rs 12,000. Minimum balance Rs 5,000').status === 'none');
+  check('Statement balance: a bare number with a comma or decimal counts; a small bare number does not',
+    P.extractStatementBalance('Balance 47,500.00').amount === 47500
+    && P.extractStatementBalance('Balance 47500').amount === 47500
+    && P.extractStatementBalance('Balance 50').status === 'none');
+  check('Statement balance: the same amount twice is still one clear candidate',
+    P.extractStatementBalance('Available Balance Rs 47,500. Balance Rs 47,500').status === 'one');
+  check('Statement balance: a negative (overdrawn) balance is read',
+    P.extractStatementBalance('Available Balance Rs -2,500').amount === -2500);
+  check('Statement balance: empty text is none',
+    P.extractStatementBalance('').status === 'none' && P.extractStatementBalance(null).status === 'none');
+  check('Statement balance: a real statement PDF with a balance line sets the baseline end to end',
+    (await (async () => {
+      const stmt = pdfDataUrl('1 0 obj << /Type /Page /Contents 2 0 R >> endobj\n'
+        + '2 0 obj << /Length 200 >> stream\n'
+        + 'BT (UBL Bank Statement) Tj ET\nBT (Account holder: Muhammad Hashir) Tj ET\nBT (Account ending 1234) Tj ET\nBT (Available Balance: Rs 47,500.00) Tj ET\n'
+        + 'endstream endobj\n');
+      const text = await P.extractPdfText(Buffer.from(stmt.dataUrl.split(',')[1], 'base64'));
+      const r = P.extractStatementBalance(text);
+      if (r.status !== 'one' || r.amount !== 47500) return false;
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
+      M.setBaselineFromBank(v, a.id, r.amount, 'statement');
+      return a.balance === 47500 && a.startingBalance === 47500 && M.reconcile(v).ok;
+    })()) === true);
+  check('Statement balance: a baseline after approved transactions back-computes the starting balance',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '1234' });
+      const t = M.addTransaction(v, { accountId: a.id, amount: 2500, direction: 'debit', merchant: 'Daraz', date: '2026-11-06', source: 'sms' });
+      M.approveTransaction(v, t.id);
+      if (a.balance !== null) return false; // the transaction alone sets nothing
+      M.setBaselineFromBank(v, a.id, 47500, 'statement');
+      return a.balance === 47500 && a.startingBalance === 50000 && M.reconcile(v).ok;
+    })());
+  // An image carries no readable text (no OCR), so there is nothing for
+  // the extractor to read — the balance path only ever runs on PDF text.
+  // The UI wiring for that is asserted in the §9h UI checks below.
+  check('Statement balance: extractStatementBalance is exported from proof.js',
+    typeof P.extractStatementBalance === 'function'
+    && P.checkProofMatch('image', null, ublCard, 'Muhammad Hashir') === 'image');
+
+  // ---- §9h (cont). Phase 3.5: UI for unknown balances ----
+  const modelJs = fs.readFileSync(path.join(__dirname, 'public', 'model.js'), 'utf8');
+  const cardsJs = fs.readFileSync(path.join(__dirname, 'public', 'cards.js'), 'utf8');
+  check('UI 3.5: no balance input anywhere on the Add form or in the app JS',
+    !html.includes('id="add-balance"') && !appJs.includes('add-balance'));
+  check('UI 3.5: the Add page note states the rule — never type a balance',
+    html.includes('You never type a balance. It is set only by your bank — paste a bank SMS or upload a statement.'));
+  check('UI 3.5: the "Balance not set yet" state exists on cards, totals and summary',
+    cardsJs.includes('Balance not set yet') && appJs.includes('Balance not set yet')
+    && html.includes('id="total-unknown"') && html.includes('id="summary-unknown"'));
+  check('UI 3.5: totals add only known balances and say how many are not set yet',
+    appJs.includes('VaultModel.totals(v)') && appJs.includes('unknownCount')
+    && appJs.includes('Total across ') && appJs.includes('not set yet'));
+  check('UI 3.5: a statement balance is read only from a PDF and set only by the bank',
+    appJs.includes('Proof.extractStatementBalance') && appJs.includes('setBaselineFromBank')
+    && appJs.includes('state.addProofBalance') && appJs.includes('Balance read from your statement:'));
+  check('UI 3.5: the SMS review note says the balance stays unknown when no balance is set',
+    appJs.includes('it stays unknown') && appJs.includes('Balance set from this SMS:'));
+  check('UI 3.5: the monthly check treats an unknown balance as not ready',
+    modelJs.includes('isBalanceKnown(account)') && modelJs.includes('accountCheckReady'));
+  check('UI 3.5: the card visual shows "Balance not set yet", not Rs 0, for an unknown balance',
+    K.buildCardVisual({ id: 'c1', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: null, confirmedBy: null }, {}).includes('Balance not set yet')
+    && !K.buildCardVisual({ id: 'c1', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: null, confirmedBy: null }, {}).includes('Rs 0')
+    && K.buildCardVisual({ id: 'c2', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: null }, {}).includes('Rs 0'));
 
   // 5e. Live smoke on a throwaway port (the real port 3036 is checked by hand below).
   const { spawn } = require('node:child_process');
