@@ -74,6 +74,11 @@ function emptyVault() {
     // lives INSIDE the vault, so it is protected by the PIN. Backup-code
     // hashes live OUTSIDE the vault (localStorage) by design (see totp.js).
     settings: { lowBalanceThreshold: 5000, twoFactor: null, autoLockMinutes: 5 },
+    // Monthly check (Phase 4): the date (YYYY-MM-DD) the last monthly
+    // check was marked done, and how many accounts were skipped then.
+    // Old vaults have neither — migrateVault() fills null / 0.
+    lastReconcileAt: null,
+    lastReconcileSkipped: 0,
   };
 }
 
@@ -132,6 +137,14 @@ function migrateVault(vault) {
   if (vault.settings.autoLockMinutes === undefined) vault.settings.autoLockMinutes = 5;
   if (vault.settings.lowBalanceThreshold === undefined) vault.settings.lowBalanceThreshold = 5000;
   if (!Array.isArray(vault.accounts)) vault.accounts = [];
+  // Bank-confirmed (Phase 3.1): old accounts have no confirmedBy — they
+  // were never proven by a bank SMS, so they load as "Not confirmed".
+  vault.accounts.forEach(function (a) { if (a && a.confirmedBy === undefined) a.confirmedBy = null; });
+  // Statement proof (Phase 3.3): old accounts have no proof field.
+  vault.accounts.forEach(function (a) { if (a && a.proof === undefined) a.proof = null; });
+  // Monthly check (Phase 4): old vaults were never reconciled.
+  if (vault.lastReconcileAt === undefined) vault.lastReconcileAt = null;
+  if (vault.lastReconcileSkipped === undefined) vault.lastReconcileSkipped = 0;
   if (!Array.isArray(vault.transactions)) vault.transactions = [];
   if (!Array.isArray(vault.notifications)) vault.notifications = [];
   return vault;
@@ -196,6 +209,10 @@ function validateAccount(input) {
   const bal = Number(input.balance);
   if (!Number.isFinite(bal)) errors.push('balance must be a number');
   else if (Math.abs(bal) > MAX_MONEY) errors.push('balance is unreasonably large');
+  // Balance sign rule (Phase 3.1): a debit card, wallet or bank account
+  // holds money you HAVE, so it can never start negative. Only a credit
+  // card can — a negative balance is money you OWE the bank.
+  else if (input.type !== 'credit' && bal < 0) errors.push('balance cannot be negative for a ' + input.type + ' account (only a credit card can owe money)');
   const hits = scanSensitive(input);
   if (hits.length) errors.push('never store full card numbers, CVV, PIN, expiry or passwords (found in: ' + hits.join(', ') + ')');
   return errors;
@@ -204,6 +221,14 @@ function validateAccount(input) {
 function createAccount(vault, input) {
   const errors = validateAccount(input);
   if (errors.length) throw fail('VALIDATION', 'Account is not valid.', errors);
+  // Duplicate guard (Phase 3.1): the same provider + last-4 is one card —
+  // adding it twice is how a made-up card gets saved. A different provider
+  // may share the same last-4 (different banks can), and the same provider
+  // may hold a different last-4.
+  const dup = (vault.accounts || []).find(function (a) {
+    return a.provider === input.provider && String(a.last4) === String(input.last4);
+  });
+  if (dup) throw fail('VALIDATION', 'You already have a ' + input.provider + ' card ending ' + String(input.last4) + '.');
   const balance = roundRs(Number(input.balance));
   const account = {
     id: newId(),
@@ -213,6 +238,13 @@ function createAccount(vault, input) {
     last4: String(input.last4),
     balance,
     startingBalance: balance,
+    // Bank-confirmed (Phase 3.1): null until a real bank SMS updates this
+    // account in Intelligence. Manual add/edit and CSV import never set it.
+    confirmedBy: null,
+    // Statement proof (Phase 3.3): a record built by the UI from a validated
+    // upload (see proof.js isValidProofRecord) — or null. The shape is
+    // checked here so a bad record can never be stored.
+    proof: validProofRecord(input.proof) ? input.proof : null,
     createdAt: new Date().toISOString(),
   };
   vault.accounts.push(account);
@@ -221,6 +253,145 @@ function createAccount(vault, input) {
 
 function findAccount(vault, accountId) {
   return vault.accounts.find((a) => a.id === accountId) || null;
+}
+
+// Rename a card (Phase 3.2, revised by Hashir's rule 2026-11-06): the
+// nickname is the user's own label — the ONLY thing a hand may change on a
+// saved card. Balance and type are bank data: after creation they can only
+// change through a bank SMS (Intelligence), a CSV statement import, or a
+// matching statement — never by typing. There is deliberately NO function
+// in this file that lets a hand edit change a balance or a type; the old
+// balance-edit path (updateAccount + "Balance correction") was removed.
+function renameAccount(vault, accountId, nickname) {
+  const account = findAccount(vault, accountId);
+  if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
+  const nick = String(nickname || '').trim();
+  if (!nick) throw fail('VALIDATION', 'nickname is required');
+  if (nick.length > 40) throw fail('VALIDATION', 'nickname must be 40 characters or fewer');
+  const hits = scanSensitive({ nickname: nick });
+  if (hits.length) throw fail('VALIDATION', 'never store full card numbers, CVV, PIN, expiry or passwords');
+  account.nickname = nick;
+  return account;
+}
+
+// Reorder (Phase 3.2): move one card one step up or down. The stored array
+// order IS the display order (carousel + Summary read the same array), so
+// it survives lock/unlock and reload. At the ends it is a no-op (false).
+function moveAccount(vault, accountId, direction) {
+  if (direction !== 'up' && direction !== 'down') {
+    throw fail('VALIDATION', 'Direction must be up or down.');
+  }
+  const idx = vault.accounts.findIndex((a) => a.id === accountId);
+  if (idx < 0) throw fail('NOT_FOUND', 'Account does not exist.');
+  const to = direction === 'up' ? idx - 1 : idx + 1;
+  if (to < 0 || to >= vault.accounts.length) return false;
+  const tmp = vault.accounts[idx];
+  vault.accounts[idx] = vault.accounts[to];
+  vault.accounts[to] = tmp;
+  return true;
+}
+
+// Delete a card (Phase 3.2): removes the account AND its transactions, so
+// reconcile() still passes afterwards. The UI confirms in two taps first.
+function deleteAccount(vault, accountId) {
+  const idx = vault.accounts.findIndex((a) => a.id === accountId);
+  if (idx < 0) throw fail('NOT_FOUND', 'Account does not exist.');
+  const account = vault.accounts[idx];
+  vault.accounts.splice(idx, 1);
+  vault.transactions = vault.transactions.filter((t) => t.accountId !== accountId);
+  return account;
+}
+
+// Remove the statement proof from a card (Phase 3.3). The card itself is
+// untouched — only its proof record is cleared, so its status falls back
+// to "Not confirmed yet" (unless a real bank SMS confirmed it).
+function removeProof(vault, accountId) {
+  const account = findAccount(vault, accountId);
+  if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
+  account.proof = null;
+  return account;
+}
+
+// A proof record is only what the UI built from a validated upload.
+function validProofRecord(proof) {
+  if (!proof || typeof proof !== 'object') return false;
+  if (proof.kind !== 'pdf' && proof.kind !== 'image') return false;
+  if (!['match', 'self-checked', 'attached', 'mismatch'].includes(proof.status)) return false;
+  if (typeof proof.dataUrl !== 'string' || proof.dataUrl.indexOf('data:') !== 0) return false;
+  if (typeof proof.name !== 'string' || !proof.name) return false;
+  return true;
+}
+// Attach (or replace) a statement proof on a saved card (Phase 4
+// re-check). The record is validated the same way as at creation.
+function attachProof(vault, accountId, proof) {
+  const account = findAccount(vault, accountId);
+  if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
+  if (!validProofRecord(proof)) throw fail('VALIDATION', 'Proof is not valid.');
+  account.proof = proof;
+  return account;
+}
+
+// ---- Monthly check (Phase 4) ----
+// An account is "ready" for the monthly check when a bank SMS confirmed it
+// or a statement matched it. Anything else needs a re-check or an explicit
+// skip. A self-checked screenshot or an unreadable statement is NOT ready.
+function accountCheckReady(account) {
+  return isBankConfirmed(account) || !!(account && account.proof && account.proof.status === 'match');
+}
+// The last date this account was confirmed (bank SMS date, else the
+// statement's upload date), or null when never confirmed.
+function lastConfirmedAt(account) {
+  if (account && account.confirmedBy && account.confirmedBy.at) return String(account.confirmedBy.at).slice(0, 10);
+  if (account && account.proof && account.proof.at) return String(account.proof.at).slice(0, 10);
+  return null;
+}
+function daysBetween(fromDateStr, toDateStr) {
+  const from = new Date(fromDateStr + 'T00:00:00Z');
+  const to = new Date(toDateStr + 'T00:00:00Z');
+  if (isNaN(from.getTime()) || isNaN(to.getTime())) return Infinity;
+  return Math.floor((to - from) / 86400000);
+}
+// The monthly check is due when it was never done, or 30+ days have passed.
+function monthlyCheckDue(vault, today) {
+  const last = vault && vault.lastReconcileAt;
+  if (!last) return true;
+  return daysBetween(last, today || todayStr()) >= 30;
+}
+// Which accounts still need a re-check or an explicit skip. skippedIds is
+// a map of account id -> true, kept in memory for this month's check.
+function monthlyCheckStatus(vault, skippedIds) {
+  const skipped = skippedIds || {};
+  const pending = [];
+  let skippedCount = 0;
+  for (const a of (vault && vault.accounts) || []) {
+    if (accountCheckReady(a)) continue;
+    if (skipped[a.id]) { skippedCount++; continue; }
+    pending.push(a);
+  }
+  return { ready: pending.length === 0, pending, skippedCount };
+}
+function markMonthlyCheckDone(vault, skippedCount) {
+  vault.lastReconcileAt = todayStr();
+  vault.lastReconcileSkipped = Number(skippedCount) || 0;
+  return vault.lastReconcileAt;
+}
+
+// Bank-confirmed status (Phase 3.1). No app can check a card with the bank
+// in Pakistan today (no personal API; open banking is draft-only), so the
+// only proof is a real bank SMS that matched this exact account in
+// Intelligence. Confirmation is sticky: Undo reverses the balance change
+// only, never the confirmation — the bank SMS itself was real.
+function isBankConfirmed(account) {
+  return !!(account && account.confirmedBy && account.confirmedBy.source === 'bank-sms'
+    && typeof account.confirmedBy.at === 'string');
+}
+function markAccountBankConfirmed(vault, accountId) {
+  const account = findAccount(vault, accountId);
+  if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
+  if (!isBankConfirmed(account)) {
+    account.confirmedBy = { source: 'bank-sms', at: new Date().toISOString() };
+  }
+  return account.confirmedBy;
 }
 
 function validateTransaction(input) {
@@ -370,6 +541,11 @@ if (typeof module !== 'undefined' && module.exports) {
     PROVIDERS, ACCOUNT_TYPES, CATEGORIES, TX_SOURCES, MAX_MONEY,
     newId, roundRs, isDateStr, todayStr, containsSensitiveValue, scanSensitive,
     emptyVault, validateAccount, createAccount, findAccount,
+    renameAccount, moveAccount, deleteAccount, removeProof,
+    validProofRecord, attachProof,
+    isBankConfirmed, markAccountBankConfirmed,
+    accountCheckReady, lastConfirmedAt, monthlyCheckDue,
+    monthlyCheckStatus, markMonthlyCheckDone,
     validateTransaction, addTransaction, addNotification,
     approveTransaction, deleteTransaction, setLowBalanceThreshold,
     enableTwoFactor, disableTwoFactor, setAutoLockMinutes,
@@ -384,6 +560,11 @@ if (typeof window !== 'undefined') {
     PROVIDERS, ACCOUNT_TYPES, CATEGORIES, TX_SOURCES, MAX_MONEY,
     newId, roundRs, isDateStr, todayStr, containsSensitiveValue, scanSensitive,
     emptyVault, validateAccount, createAccount, findAccount,
+    renameAccount, moveAccount, deleteAccount, removeProof,
+    validProofRecord, attachProof,
+    isBankConfirmed, markAccountBankConfirmed,
+    accountCheckReady, lastConfirmedAt, monthlyCheckDue,
+    monthlyCheckStatus, markMonthlyCheckDone,
     validateTransaction, addTransaction, addNotification,
     approveTransaction, deleteTransaction, setLowBalanceThreshold,
     enableTwoFactor, disableTwoFactor, setAutoLockMinutes,
