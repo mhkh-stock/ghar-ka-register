@@ -11,6 +11,7 @@ const C = require('./public/csv.js');
 const K = require('./public/cards.js');
 const I = require('./public/intel.js');
 const T = require('./public/totp.js');
+const N = require('./public/nav.js');
 
 let passed = 0, failed = 0;
 function check(name, cond, extra) {
@@ -614,6 +615,153 @@ async function main() {
       return out.vault.settings.twoFactor === null && Array.isArray(out.vault.accounts);
     })());
 
+  // ---- §9a. Phase 3: hash routing (nav.js, pure) + profile + bell read-state ----
+  check('Nav: routeForHash maps every page hash',
+    N.routeForHash('#/wallet') === 'wallet' && N.routeForHash('#/add') === 'add'
+    && N.routeForHash('#/intelligence') === 'intelligence' && N.routeForHash('#/security') === 'security'
+    && N.routeForHash('#/backup') === 'backup' && N.routeForHash('#/profile') === 'profile');
+  check('Nav: unknown/empty/missing hash falls back to the Wallet page',
+    N.routeForHash('') === 'wallet' && N.routeForHash('#/nope') === 'wallet'
+    && N.routeForHash('#wallet') === 'wallet' && N.routeForHash(null) === 'wallet'
+    && N.routeForHash('#/wallet?x=1') === 'wallet');
+  check('Nav: the sidebar order is exactly Wallet, Add Card, Intelligence, Security, Backup & Import, Profile',
+    N.NAV_ORDER.map((o) => o.label).join('|') === 'Wallet|Add Card|Intelligence|Security|Backup & Import|Profile'
+    && N.NAV_ORDER.map((o) => o.id).join('|') === 'wallet|add|intelligence|security|backup|profile');
+  const SMALL_DP = 'data:image/jpeg;base64,/9j/AAAA';
+  const vprof = M.emptyVault();
+  check('Profile: a new vault starts with an empty profile',
+    vprof.profile && vprof.profile.displayName === '' && vprof.profile.phone === ''
+    && vprof.profile.email === '' && vprof.profile.dp === null);
+  M.setProfile(vprof, { displayName: 'Muhammad Hashir', phone: '0300 1234567', email: 'h@example.com', dp: SMALL_DP });
+  check('Profile: save/load round-trip keeps name, phone, email and DP',
+    vprof.profile.displayName === 'Muhammad Hashir' && vprof.profile.phone === '0300 1234567'
+    && vprof.profile.email === 'h@example.com' && vprof.profile.dp === SMALL_DP);
+  check('Profile: saving without a DP keeps the old DP',
+    (() => { M.setProfile(vprof, { displayName: 'Hashir', phone: '', email: '' }); return vprof.profile.dp === SMALL_DP && vprof.profile.displayName === 'Hashir'; })());
+  check('Profile: saving with dp=null clears the DP',
+    (() => { M.setProfile(vprof, { displayName: 'Hashir', phone: '', email: '', dp: null }); return vprof.profile.dp === null; })());
+  check('Profile: a bad email, a too-long name and a too-long phone are rejected',
+    M.validateProfile({ displayName: 'x', email: 'not-an-email' }).length === 1
+    && M.validateProfile({ displayName: 'x'.repeat(61) }).length === 1
+    && M.validateProfile({ displayName: 'x', phone: 'a'.repeat(21) }).length === 1);
+  check('Profile: setProfile throws VALIDATION on a bad profile',
+    (() => { try { M.setProfile(vprof, { displayName: 'x', email: 'nope' }); return false; } catch (e) { return e.code === 'VALIDATION'; } })());
+  check('Profile: a profile must not contain a full card number or a long digit run',
+    M.validateProfile({ displayName: 'card ' + '4534'.repeat(4) }).length > 0
+    && M.validateProfile({ displayName: 'account ' + '1'.repeat(13) }).length > 0);
+  check('Profile: DP size cap — a data URL over 100 KB is rejected, a small one is accepted',
+    (() => {
+      const bigDp = 'data:image/jpeg;base64,' + 'A'.repeat(Math.ceil((M.MAX_DP_BYTES + 1) * 4 / 3));
+      return M.MAX_DP_BYTES === 100 * 1024
+        && M.validateProfile({ displayName: 'x', dp: bigDp }).some((e) => e.indexOf('100 KB') >= 0)
+        && M.validateProfile({ displayName: 'x', dp: SMALL_DP }).length === 0
+        && M.validateProfile({ displayName: 'x', dp: 'data:image/png;base64,AAAA' }).length === 1;
+    })());
+  check('Profile: DP downscale — long side becomes 256px, small photos are never upscaled',
+    (() => {
+      const a = M.dpTargetSize(1024, 768), b = M.dpTargetSize(100, 50), c = M.dpTargetSize(200, 400), d = M.dpTargetSize(256, 256);
+      return a.width === 256 && a.height === 192 && b.width === 100 && b.height === 50
+        && c.width === 128 && c.height === 256 && d.width === 256 && d.height === 256;
+    })());
+  check('Profile: an old vault without a profile loads with an empty profile (migration default)',
+    (() => {
+      const old = { v: 1, createdAt: '2026-11-06T00:00:00.000Z', accounts: [], transactions: [], notifications: [], settings: { lowBalanceThreshold: 5000 } };
+      const mig = M.migrateVault(old);
+      return mig.profile.displayName === '' && mig.profile.phone === '' && mig.profile.email === '' && mig.profile.dp === null
+        && mig.settings.twoFactor === null && mig.settings.autoLockMinutes === 5 && mig.settings.lowBalanceThreshold === 5000;
+    })());
+  check('Profile: a migrated old vault survives an encrypt/decrypt round-trip',
+    await (async () => {
+      const old = { v: 1, createdAt: '2026-11-06T00:00:00.000Z', accounts: [], transactions: [], notifications: [], settings: { lowBalanceThreshold: 5000 } };
+      const made = await V.createVault('482917', '', M.migrateVault(old));
+      const out = await V.unlockVault('482917', '', made.envelope);
+      return out.vault.profile && out.vault.profile.displayName === '' && out.vault.profile.dp === null;
+    })());
+  const vbell = M.emptyVault();
+  M.addNotification(vbell, 'transaction', 'test one');
+  M.addNotification(vbell, 'low-balance', 'test two');
+  check('Bell: new notifications start unread, and the badge count equals the unread count',
+    M.unreadNotificationCount(vbell) === 2 && vbell.notifications.every((n) => n.read === false));
+  check('Bell: opening the bell marks all read (badge clears)',
+    M.markAllNotificationsRead(vbell) === 2 && M.unreadNotificationCount(vbell) === 0
+    && vbell.notifications.every((n) => n.read === true));
+  check('Bell: a notification from an old save (no read key) counts as unread',
+    (() => {
+      const old = M.emptyVault();
+      old.notifications.push({ id: 'x1', kind: 'transaction', text: 'old', at: new Date().toISOString() });
+      return M.unreadNotificationCount(old) === 1 && M.markAllNotificationsRead(old) === 1;
+    })());
+
+  // ---- §9b. Phase 3: page structure (parsed from index.html / styles.css / app.js) ----
+  // Pages never nest <section>, so a page is the text from its opening tag
+  // to the first </section> after it.
+  const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+  const css = fs.readFileSync(path.join(__dirname, 'public', 'styles.css'), 'utf8');
+  const appJs = fs.readFileSync(path.join(__dirname, 'public', 'app.js'), 'utf8');
+  function pageHtml(page) {
+    const start = html.indexOf('id="page-' + page + '"');
+    if (start < 0) return '';
+    const end = html.indexOf('</section>', start);
+    return html.slice(start, end);
+  }
+  const navStart = html.indexOf('<nav id="sidebar-nav"');
+  const navBlock = html.slice(navStart, html.indexOf('</nav>', navStart));
+  const navLabels = [...navBlock.matchAll(/<span class="nav-label">([^<]+)<\/span>/g)].map((m) => m[1].replace(/&amp;/g, '&'));
+  check('Structure: the sidebar buttons run in Hashir\'s exact order',
+    navLabels.join('|') === 'Wallet|Add Card|Intelligence|Security|Backup & Import|Profile');
+  check('Structure: all six pages exist',
+    ['wallet', 'add', 'intelligence', 'security', 'backup', 'profile'].every((p) => html.includes('id="page-' + p + '"')));
+  const wallet = pageHtml('wallet');
+  check('Structure: the Wallet page holds ONLY cards + summary + the Add button',
+    wallet.includes('id="accounts-card"') && wallet.includes('id="summary-card"')
+    && wallet.includes('id="txns-card"') && wallet.includes('id="wallet-add-btn"')
+    && wallet.includes('id="vault-stepper"')
+    && !wallet.includes('id="add-account-card"') && !wallet.includes('id="sms-card"')
+    && !wallet.includes('id="csv-card"') && !wallet.includes('id="backup-card"')
+    && !wallet.includes('id="security-settings-card"') && !wallet.includes('id="security-card"')
+    && !wallet.includes('id="connect-card"') && !wallet.includes('notifs'));
+  check('Structure: the stepper lives on the Wallet page only',
+    wallet.includes('id="vault-stepper"')
+    && !pageHtml('add').includes('vault-stepper') && !pageHtml('intelligence').includes('vault-stepper')
+    && !pageHtml('security').includes('vault-stepper') && !pageHtml('backup').includes('vault-stepper')
+    && !pageHtml('profile').includes('vault-stepper'));
+  check('Structure: Add holds the form + Connect a bank; Intelligence holds the SMS panel',
+    pageHtml('add').includes('id="add-account-card"') && pageHtml('add').includes('id="connect-card"')
+    && pageHtml('intelligence').includes('id="sms-card"'));
+  check('Structure: Security holds 2FA/settings + the protection note; Backup holds backup + CSV',
+    pageHtml('security').includes('id="security-settings-card"') && pageHtml('security').includes('id="security-card"')
+    && pageHtml('backup').includes('id="backup-card"') && pageHtml('backup').includes('id="csv-card"'));
+  check('Structure: Profile holds the DP upload + name/phone/email + Save',
+    pageHtml('profile').includes('id="profile-card"') && pageHtml('profile').includes('id="profile-dp-input"')
+    && pageHtml('profile').includes('id="profile-name"') && pageHtml('profile').includes('id="profile-phone"')
+    && pageHtml('profile').includes('id="profile-email"') && pageHtml('profile').includes('id="profile-save-btn"'));
+  check('Structure: every non-Wallet page has a "← Back to Wallet" link',
+    ['add', 'intelligence', 'security', 'backup', 'profile'].every((p) =>
+      pageHtml(p).includes('<a class="back-link" href="#/wallet">← Back to Wallet</a>')));
+  check('Structure: the bell (button + badge + dropdown) is in the sidebar, not on a page',
+    html.includes('id="bell-btn"') && html.includes('id="bell-badge"') && html.includes('id="notif-panel"')
+    && html.includes('id="bell-list"') && html.includes('id="bell-empty"') && html.includes('id="bell-mark-read"')
+    && html.indexOf('id="sidebar"') > html.indexOf('id="vault-screen"'));
+  check('Structure: the sidebar header and the top bar both show the DP + name',
+    html.includes('id="sidebar-dp"') && html.includes('id="sidebar-dp-initials"') && html.includes('id="sidebar-name"')
+    && html.includes('id="topbar-dp"') && html.includes('id="topbar-dp-initials"') && html.includes('id="topbar-name"'));
+  check('Structure: no leftover single-page sections (no vault-grid, no notifs card)',
+    !html.includes('vault-grid') && !html.includes('vault-col') && !html.includes('notifs-card')
+    && !html.includes('notifs-list') && !html.includes('notifs-empty')
+    && !appJs.includes('notifs-list') && !appJs.includes('STEP_CARDS') && !appJs.includes('STEP_DONE'));
+  check('Fix: content can never hide under the sticky top bar (top padding + scroll margins)',
+    css.includes('scroll-margin-top: 96px') && css.includes('scroll-padding-top: 96px')
+    && /main \{[^}]*padding: 24px 16px 16px;/.test(css));
+  check('Fix: the stepper is in the normal flow, never sticky (it cannot overlap a form)',
+    (() => {
+      const m = css.match(/\.stepper \{[^}]*\}/);
+      return m && !m[0].includes('sticky') && !m[0].includes('position:');
+    })());
+  check('Wiring: app.js routes hashes, toggles the bell, marks read, and migrates old vaults',
+    appJs.includes('Nav.routeForHash') && appJs.includes('function showPage') && appJs.includes('toggleBell')
+    && appJs.includes('markAllNotificationsRead') && appJs.includes('unreadNotificationCount')
+    && appJs.includes('migrateVault(out.vault)') && appJs.includes("hide($('totp-screen'))"));
+
   // 5e. Live smoke on a throwaway port (the real port 3036 is checked by hand below).
   const { spawn } = require('node:child_process');
   const TEST_PORT = 3037;
@@ -642,17 +790,17 @@ async function main() {
     }
     check('Smoke: server comes up on a fresh port', up);
     check('Smoke: /health ok', (await req('GET', '/health')).status === 200);
-    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/sms.js', '/csv.js', '/cards.js', '/intel.js', '/totp.js', '/app.js', '/bg.jpg']) {
+    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/sms.js', '/csv.js', '/cards.js', '/intel.js', '/totp.js', '/nav.js', '/app.js', '/bg.jpg']) {
       check('Smoke: GET ' + p + ' -> 200', (await req('GET', p)).status === 200);
     }
     const home = await req('GET', '/');
     check('Smoke: homepage mentions the vault + no-recovery warning',
       home.raw.includes('Personal Card Vault') && home.raw.includes('No recovery, by design'));
-    check('Smoke: homepage loads all seven shared scripts',
+    check('Smoke: homepage loads all eight shared scripts',
       home.raw.includes('/vault.js') && home.raw.includes('/model.js')
       && home.raw.includes('/sms.js') && home.raw.includes('/csv.js')
       && home.raw.includes('/cards.js') && home.raw.includes('/intel.js')
-      && home.raw.includes('/totp.js'));
+      && home.raw.includes('/totp.js') && home.raw.includes('/nav.js'));
     check('Smoke: unknown page -> 404', (await req('GET', '/nope.html')).status === 404);
   } finally {
     server.kill();
