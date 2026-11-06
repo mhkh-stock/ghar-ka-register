@@ -10,6 +10,7 @@ const S = require('./public/sms.js');
 const C = require('./public/csv.js');
 const K = require('./public/cards.js');
 const I = require('./public/intel.js');
+const P = require('./public/proof.js');
 const T = require('./public/totp.js');
 const N = require('./public/nav.js');
 
@@ -512,9 +513,13 @@ async function main() {
     && I.findIntelMatch(intelVault.accounts, 'JazzCash', null).status === 'none');
   check('Intel: two accounts, same provider + last-4 -> ambiguous',
     (() => {
+      // Built by hand, not createAccount: creation now forbids a duplicate
+      // provider + last-4, but an old vault can still hold one — and the
+      // matcher must still refuse to guess which one an SMS belongs to.
       const v = M.emptyVault();
-      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'A', last4: '7777', balance: 1000 });
-      M.createAccount(v, { provider: 'UBL', type: 'credit', nickname: 'B', last4: '7777', balance: 2000 });
+      v.accounts.push(
+        { id: 'dup1', provider: 'UBL', type: 'debit', nickname: 'A', last4: '7777', balance: 1000, startingBalance: 1000, confirmedBy: null, createdAt: '2026-11-06T00:00:00.000Z' },
+        { id: 'dup2', provider: 'UBL', type: 'credit', nickname: 'B', last4: '7777', balance: 2000, startingBalance: 2000, confirmedBy: null, createdAt: '2026-11-06T00:00:00.000Z' });
       return I.findIntelMatch(v.accounts, 'UBL', '7777').status === 'ambiguous';
     })());
   const jcAccount = I.findIntelMatch(intelVault.accounts, 'JazzCash', '1234').account;
@@ -709,8 +714,8 @@ async function main() {
   const navLabels = [...navBlock.matchAll(/<span class="nav-label">([^<]+)<\/span>/g)].map((m) => m[1].replace(/&amp;/g, '&'));
   check('Structure: the sidebar buttons run in Hashir\'s exact order',
     navLabels.join('|') === 'Wallet|Add Card|Intelligence|Security|Backup & Import|Profile');
-  check('Structure: all six pages exist',
-    ['wallet', 'add', 'intelligence', 'security', 'backup', 'profile'].every((p) => html.includes('id="page-' + p + '"')));
+  check('Structure: all seven pages exist',
+    ['wallet', 'add', 'intelligence', 'security', 'backup', 'profile', 'reconcile'].every((p) => html.includes('id="page-' + p + '"')));
   const wallet = pageHtml('wallet');
   check('Structure: the Wallet page holds ONLY cards + summary + the Add button',
     wallet.includes('id="accounts-card"') && wallet.includes('id="summary-card"')
@@ -736,7 +741,7 @@ async function main() {
     && pageHtml('profile').includes('id="profile-name"') && pageHtml('profile').includes('id="profile-phone"')
     && pageHtml('profile').includes('id="profile-email"') && pageHtml('profile').includes('id="profile-save-btn"'));
   check('Structure: every non-Wallet page has a "← Back to Wallet" link',
-    ['add', 'intelligence', 'security', 'backup', 'profile'].every((p) =>
+    ['add', 'intelligence', 'security', 'backup', 'profile', 'reconcile'].every((p) =>
       pageHtml(p).includes('<a class="back-link" href="#/wallet">← Back to Wallet</a>')));
   check('Structure: the bell (button + badge + dropdown) is in the sidebar, not on a page',
     html.includes('id="bell-btn"') && html.includes('id="bell-badge"') && html.includes('id="notif-panel"')
@@ -778,6 +783,445 @@ async function main() {
     css.includes('.sidebar-profile:hover') && css.includes('.sidebar-profile:focus-visible')
     && css.includes('.topbar .profile-chip:hover') && css.includes('.topbar .profile-chip:focus-visible'));
 
+  // ---- §9d. Phase 3.1, Step 1: tighter add-account validation ----
+  check('Verify: same provider + last-4 cannot be added twice (error names the card)',
+    (() => {
+      const v = M.emptyVault();
+      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL main', last4: '1234', balance: 1000 });
+      try {
+        M.createAccount(v, { provider: 'UBL', type: 'credit', nickname: 'UBL other', last4: '1234', balance: 0 });
+        return false;
+      } catch (e) {
+        return e.code === 'VALIDATION' && e.message.includes('UBL') && e.message.includes('1234');
+      }
+    })());
+  check('Verify: same last-4 under a different provider is allowed (different banks can share it)',
+    (() => {
+      const v = M.emptyVault();
+      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
+      const second = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '1234', balance: 500 });
+      return !!second && v.accounts.length === 2;
+    })());
+  check('Verify: same provider + a different last-4 is allowed',
+    (() => {
+      const v = M.emptyVault();
+      M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL 1', last4: '1234', balance: 1000 });
+      const second = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL 2', last4: '5678', balance: 500 });
+      return !!second && v.accounts.length === 2;
+    })());
+  check('Verify: negative balance rejected for debit / wallet / bank',
+    M.validateAccount({ provider: 'HBL', type: 'debit', nickname: 'X', last4: '1234', balance: -100 }).length > 0
+    && M.validateAccount({ provider: 'JazzCash', type: 'wallet', nickname: 'X', last4: '1234', balance: -100 }).length > 0
+    && M.validateAccount({ provider: 'HBL', type: 'bank', nickname: 'X', last4: '1234', balance: -100 }).length > 0);
+  check('Verify: negative balance allowed for a credit card (money owed)',
+    M.validateAccount({ provider: 'HBL', type: 'credit', nickname: 'X', last4: '1234', balance: -5000 }).length === 0);
+  check('Verify: a new account starts unconfirmed (confirmedBy null)',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0 });
+      return a.confirmedBy === null && M.isBankConfirmed(a) === false;
+    })());
+
+  // ---- §9d (cont). Phase 3.1, Step 2: bank-confirmed status ----
+  const intelJs = fs.readFileSync(path.join(__dirname, 'public', 'intel.js'), 'utf8');
+  const confVault = M.emptyVault();
+  M.createAccount(confVault, { provider: 'JazzCash', type: 'wallet', nickname: 'JC daily', last4: '1234', balance: 50000 });
+  const confDraft = S.parseSms('Rs 2,500.00 debited from your JazzCash account ••••1234 at Daraz on 06-Nov-2026. Available balance Rs 47,500.00');
+  const confAcct = I.findIntelMatch(confVault.accounts, 'JazzCash', '1234').account;
+  check('Verify: a real bank-SMS direct match marks the account bank-confirmed with a date',
+    (() => {
+      const out = I.applyIntelUpdate(confVault, confDraft, confAcct);
+      return out.confirmed === true && confAcct.confirmedBy && confAcct.confirmedBy.source === 'bank-sms'
+        && typeof confAcct.confirmedBy.at === 'string' && !isNaN(Date.parse(confAcct.confirmedBy.at))
+        && M.isBankConfirmed(confAcct) === true && out.newBalance === 47500;
+    })());
+  check('Verify: Undo reverses the balance only — the confirmation stays (the SMS was real)',
+    (() => {
+      const out = I.undoIntelUpdate(confVault, confVault.transactions[0].id, confVault.notifications[0] ? confVault.notifications[0].id : null);
+      return out.balance === 50000 && confVault.transactions.length === 0
+        && M.isBankConfirmed(confAcct) === true && confAcct.confirmedBy.source === 'bank-sms';
+    })());
+  check('Verify: a second SMS does not re-stamp the confirmation (first date kept)',
+    (() => {
+      const v = M.emptyVault();
+      M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '4321', balance: 10000 });
+      const a = v.accounts[0];
+      const d1 = S.parseSms('Rs 500.00 debited from your HBL account ••••4321 on 06-Nov-2026.');
+      const d2 = S.parseSms('Rs 200.00 debited from your HBL account ••••4321 on 06-Nov-2026.');
+      const o1 = I.applyIntelUpdate(v, d1, a);
+      const firstAt = a.confirmedBy.at;
+      const o2 = I.applyIntelUpdate(v, d2, a);
+      return o1.confirmed === true && o2.confirmed === false && a.confirmedBy.at === firstAt;
+    })());
+  check('Verify: manual add and manual/CSV transactions never confirm an account',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '9999', balance: 10000 });
+      const t1 = M.addTransaction(v, { accountId: a.id, amount: 500, direction: 'debit', merchant: 'Shop', date: '2026-11-06', source: 'manual' });
+      M.approveTransaction(v, t1.id);
+      const t2 = M.addTransaction(v, { accountId: a.id, amount: 1000, direction: 'credit', merchant: 'Salary', date: '2026-11-06', source: 'csv' });
+      M.approveTransaction(v, t2.id);
+      return M.isBankConfirmed(a) === false && a.confirmedBy === null;
+    })());
+  check('Verify: an old vault without confirmedBy loads as unconfirmed',
+    (() => {
+      const v = M.emptyVault();
+      v.accounts.push({ id: 'old1', provider: 'UBL', type: 'debit', nickname: 'Old', last4: '1111', balance: 100, startingBalance: 100, createdAt: '2026-11-06T00:00:00.000Z' });
+      M.migrateVault(v);
+      return v.accounts[0].confirmedBy === null && M.isBankConfirmed(v.accounts[0]) === false;
+    })());
+  check('Verify: only the Intelligence direct-match path can confirm (review/CSV/manual never call it)',
+    intelJs.includes('markAccountBankConfirmed') && !appJs.includes('markAccountBankConfirmed'));
+  check('Verify: cards show the bank-confirmed badge, unconfirmed cards the muted badge',
+    K.buildCardVisual({ id: 'c1', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: { source: 'bank-sms', at: '2026-11-06T00:00:00.000Z' } }, {}).includes('✓ Bank-confirmed')
+    && K.buildCardVisual({ id: 'c2', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: null }, {}).includes('Not confirmed yet')
+    && K.confirmationBadge({ confirmedBy: { source: 'bank-sms', at: 'x' } }).includes('Bank-confirmed')
+    && appJs.includes('Cards.confirmationBadge(a)'));
+  check('Verify: the Add page carries the honest note',
+    html.includes('id="add-honest-note"') && html.includes('We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan.'));
+  check('Verify: the badge styles exist',
+    css.includes('.cv-confirmed') && css.includes('.sum-row .pill'));
+
+  // ---- §9e. Phase 3.2 (REVISED by Hashir's rule 2026-11-06): rename,
+  // reorder, delete. A saved card's data can only be changed by a bank SMS
+  // — never by the user's hand. The only hand-change is the nickname.
+  check('Rename: unknown account id rejected',
+    throwsCode(function () {
+      M.renameAccount(M.emptyVault(), 'nope', 'X');
+    }, 'NOT_FOUND'));
+  check('Rename: empty, over-long or sensitive nicknames rejected',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
+      return throwsCode(function () { M.renameAccount(v, a.id, '  '); }, 'VALIDATION')
+        && throwsCode(function () { M.renameAccount(v, a.id, 'x'.repeat(41)); }, 'VALIDATION')
+        && throwsCode(function () { M.renameAccount(v, a.id, 'card 0000000000000000'); }, 'VALIDATION');
+    })());
+  check('Rename: only the nickname changes — balance, type, proof and confirmation untouched, reconcile clean',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
+      M.renameAccount(v, a.id, 'UBL Salary');
+      return a.nickname === 'UBL Salary' && a.balance === 1000 && a.type === 'debit'
+        && a.startingBalance === 1000 && a.provider === 'UBL' && a.last4 === '1234'
+        && v.transactions.length === 0 && M.reconcile(v).ok;
+    })());
+  check('Rename: a bank-confirmed card keeps its badge after a rename',
+    (() => {
+      const v = M.emptyVault();
+      M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '1234', balance: 50000 });
+      const a = v.accounts[0];
+      const d = S.parseSms('Rs 2,500.00 debited from your JazzCash account ••••1234 on 06-Nov-2026.');
+      I.applyIntelUpdate(v, d, a);
+      M.renameAccount(v, a.id, 'JC daily');
+      return M.isBankConfirmed(a) === true && a.nickname === 'JC daily' && a.balance === 47500;
+    })());
+  check('Audit: NO model function lets a hand edit change a balance or a type (updateAccount is gone)',
+    typeof M.updateAccount === 'undefined'
+    && !Object.keys(M).some((k) => /updateAccount|setBalance|setType|editAccount/i.test(k)));
+  check('Audit: no balance/type edit control exists in the UI (rename form has nickname only)',
+    !html.includes('id="edit-balance"') && !html.includes('id="edit-type"')
+    && !appJs.includes('edit-balance') && !appJs.includes('edit-type')
+    && !appJs.includes('updateAccount') && appJs.includes('VaultModel.renameAccount'));
+  check('Reorder: up/down swap neighbours; ends are a no-op; unknown id rejected',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 1 });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 2 });
+      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333', balance: 3 });
+      const topNoop = M.moveAccount(v, a.id, 'up') === false;
+      const bottomNoop = M.moveAccount(v, c.id, 'down') === false;
+      const moved = M.moveAccount(v, c.id, 'up') === true;
+      const order = v.accounts.map((x) => x.nickname).join('|');
+      const movedBack = M.moveAccount(v, c.id, 'down') === true;
+      const orderBack = v.accounts.map((x) => x.nickname).join('|');
+      return topNoop && bottomNoop && moved && order === 'A|C|B' && movedBack && orderBack === 'A|B|C'
+        && throwsCode(function () { M.moveAccount(v, 'nope', 'up'); }, 'NOT_FOUND')
+        && throwsCode(function () { M.moveAccount(v, a.id, 'left'); }, 'VALIDATION');
+    })());
+  check('Delete: removes the account AND its transactions; reconcile stays clean; unknown id rejected',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 10000 });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 5000 });
+      const t = M.addTransaction(v, { accountId: a.id, amount: 500, direction: 'debit', merchant: 'Shop', date: '2026-11-06', source: 'manual' });
+      M.approveTransaction(v, t.id);
+      M.addTransaction(v, { accountId: b.id, amount: 100, direction: 'debit', merchant: 'Shop', date: '2026-11-06', source: 'manual' });
+      const removed = M.deleteAccount(v, a.id);
+      return removed.nickname === 'A' && v.accounts.length === 1 && v.accounts[0].id === b.id
+        && v.transactions.every((x) => x.accountId === b.id) && v.transactions.length === 1
+        && M.reconcile(v).ok
+        && throwsCode(function () { M.deleteAccount(v, 'nope'); }, 'NOT_FOUND');
+    })());
+  check('Delete: removing the last card leaves an empty vault',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 100 });
+      M.deleteAccount(v, a.id);
+      return v.accounts.length === 0 && M.totals(v).count === 0 && M.reconcile(v).ok;
+    })());
+
+  // ---- §9e (cont). Phase 3.2: card management UI structure ----
+  check('Manage: the Wallet page has a rename panel with provider + last-4 read-only and nickname only',
+    pageHtml('wallet').includes('id="edit-account-card"')
+    && pageHtml('wallet').includes('id="edit-provider"') && pageHtml('wallet').includes('id="edit-last4"')
+    && pageHtml('wallet').includes('id="edit-nick"') && pageHtml('wallet').includes('id="edit-save-btn"')
+    && pageHtml('wallet').includes('id="edit-cancel-btn"')
+    && !pageHtml('wallet').includes('id="edit-type"') && !pageHtml('wallet').includes('id="edit-balance"')
+    && /id="edit-provider"[^>]*readonly/.test(html) && /id="edit-last4"[^>]*readonly/.test(html));
+  check('Manage: every card and every Summary row gets Edit / ↑ / ↓ / Remove buttons',
+    appJs.includes('cardActionsHtml') && appJs.includes('sumActionsHtml')
+    && appJs.includes('data-action="edit"') && appJs.includes('data-action="move-up"')
+    && appJs.includes('data-action="move-down"') && appJs.includes('data-action="remove"')
+    && appJs.includes("data-action=\"confirm-remove\"") && appJs.includes("data-action=\"cancel-remove\""));
+  check('Manage: reorder buttons are disabled at the ends (first ↑, last ↓)',
+    appJs.includes("(i === 0 ? ' disabled' : '')") && appJs.includes("(i === n - 1 ? ' disabled' : '')"));
+  check('Manage: delete is two-tap — the first tap only arms, the confirm says the transactions go too',
+    appJs.includes('pendingDeleteId') && appJs.includes('requestDelete') && appJs.includes('confirmDelete')
+    && appJs.includes('This also removes its transactions.')
+    && appJs.includes('if (state.pendingDeleteId !== accountId) return;'));
+  check('Manage: rename/reorder/delete go through persist + render',
+    appJs.includes('VaultModel.renameAccount') && appJs.includes('VaultModel.moveAccount')
+    && appJs.includes('VaultModel.deleteAccount') && appJs.includes('showSecuring(updated,')
+    && appJs.includes('cardActionsHtml(a, i, v.accounts.length)'));
+
+  // ---- §9f. Phase 3.3: statement proof (module) ----
+  // Minimal readable-text PDFs, built in-test (latin1 -> base64 data URL).
+  function pdfDataUrl(body) {
+    const bytes = Buffer.from('%PDF-1.4\n' + body, 'latin1');
+    return { dataUrl: 'data:application/pdf;base64,' + bytes.toString('base64'), size: bytes.length };
+  }
+  const stmtFull = pdfDataUrl('1 0 obj << /Type /Page /Contents 2 0 R >> endobj\n'
+    + '2 0 obj << /Length 200 >> stream\n'
+    + 'BT (UBL Bank Statement) Tj ET\nBT (Account holder: Muhammad Hashir) Tj ET\nBT (Account ending 1234) Tj ET\n'
+    + 'endstream endobj\n');
+  const stmtNoName = pdfDataUrl('1 0 obj << /Type /Page /Contents 2 0 R >> endobj\n'
+    + '2 0 obj << /Length 200 >> stream\n'
+    + 'BT (UBL Bank Statement) Tj ET\nBT (Account ending 1234) Tj ET\n'
+    + 'endstream endobj\n');
+  const stmtBlank = pdfDataUrl('% just a header, no text\n');
+  const pngFile = { dataUrl: 'data:image/png;base64,' + Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]).toString('base64'), size: 12 };
+  const jpgFile = { dataUrl: 'data:image/jpeg;base64,' + Buffer.from([0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0]).toString('base64'), size: 8 };
+  const txtFile = { dataUrl: 'data:text/plain;base64,' + Buffer.from('hello world').toString('base64'), size: 11 };
+  const ublCard = { provider: 'UBL', last4: '1234' };
+  check('Proof: magic bytes detect PDF / JPEG / PNG, and reject a text file',
+    P.detectProofKind(Buffer.from([0x25, 0x50, 0x44, 0x46])) === 'pdf'
+    && P.detectProofKind(Buffer.from([0xFF, 0xD8, 0xFF])) === 'image'
+    && P.detectProofKind(Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A])) === 'image'
+    && P.detectProofKind(Buffer.from('hello')) === null);
+  check('Proof: over 500 KB rejected with the exact message; a valid PDF under the cap passes',
+    P.validateProofData(stmtFull.dataUrl, P.MAX_PROOF_BYTES + 1).errors.includes('Statement is too large — upload a file under 500 KB.')
+    && P.validateProofData(stmtFull.dataUrl, stmtFull.size).ok === true
+    && P.validateProofData(txtFile.dataUrl, txtFile.size).errors.includes('Only a PDF or a photo (JPEG/PNG) can be used as proof.'));
+  check('Proof: a text PDF holding provider + last-4 + profile name is a match',
+    (await P.extractPdfText(Buffer.from(stmtFull.dataUrl.split(',')[1], 'base64'))) !== null
+    && P.checkProofMatch('pdf', await P.extractPdfText(Buffer.from(stmtFull.dataUrl.split(',')[1], 'base64')), ublCard, 'Muhammad Hashir') === 'match');
+  check('Proof: the same PDF without the profile name is NOT a match (name is missing)',
+    P.checkProofMatch('pdf', await P.extractPdfText(Buffer.from(stmtNoName.dataUrl.split(',')[1], 'base64')), ublCard, 'Muhammad Hashir') === 'mismatch'
+    && P.missingProofTerms('pdf', await P.extractPdfText(Buffer.from(stmtNoName.dataUrl.split(',')[1], 'base64')), ublCard, 'Muhammad Hashir').includes('Muhammad Hashir'));
+  check('Proof: no profile name set — the name check is skipped, provider + last-4 decide',
+    P.checkProofMatch('pdf', await P.extractPdfText(Buffer.from(stmtNoName.dataUrl.split(',')[1], 'base64')), ublCard, '') === 'match'
+    && P.checkProofMatch('pdf', await P.extractPdfText(Buffer.from(stmtNoName.dataUrl.split(',')[1], 'base64')), ublCard, null) === 'match');
+  check('Proof: a PDF with no readable text is unreadable (kept as a record, never a match)',
+    (await P.extractPdfText(Buffer.from(stmtBlank.dataUrl.split(',')[1], 'base64'))) === null
+    && P.checkProofMatch('pdf', null, ublCard, 'Muhammad Hashir') === 'unreadable');
+  check('Proof: an image claims no automatic match — the user checks it by eye',
+    P.validateProofData(pngFile.dataUrl, pngFile.size).kind === 'image'
+    && P.validateProofData(jpgFile.dataUrl, jpgFile.size).kind === 'image'
+    && P.checkProofMatch('image', null, ublCard, 'Muhammad Hashir') === 'image');
+  check('Proof: word boundaries — "JS" does not match "adjust", "1234" does not match "12345"',
+    P.containsTerm('adjust your settings', 'JS') === false
+    && P.containsTerm('account 12345', '1234') === false
+    && P.containsTerm('JS Bank account 1234', 'JS') === true
+    && P.containsTerm('Account ending 1234', '1234') === true);
+  check('Proof: dataUrlToBytes returns the raw bytes behind a data URL',
+    (() => {
+      const b = P.dataUrlToBytes(stmtFull.dataUrl);
+      return b && b.length === stmtFull.size && b[0] === 0x25 && P.dataUrlToBytes('not-a-data-url') === null;
+    })());
+  check('Proof: a Flate-compressed stream is inflated and read (bank PDFs are usually compressed)',
+    (await (async () => {
+      const zlib = require('node:zlib');
+      const body = 'BT (UBL Bank Statement) Tj ET\nBT (Muhammad Hashir) Tj ET\nBT (ending 1234) Tj ET';
+      const deflated = zlib.deflateRawSync(Buffer.from(body, 'latin1'));
+      const pdf = Buffer.concat([Buffer.from('%PDF-1.4\n1 0 obj << /Length ' + deflated.length + ' /Filter /FlateDecode >> stream\n', 'latin1'), deflated, Buffer.from('\nendstream endobj\n', 'latin1')]);
+      const text = await P.extractPdfText(pdf);
+      return text && P.checkProofMatch('pdf', text, ublCard, 'Muhammad Hashir') === 'match';
+    })()) === true);
+
+  // ---- §9f (cont). Phase 3.3: proof on the account (model + ladder) ----
+  function proofRecord(status) {
+    return { kind: 'pdf', name: 'statement.pdf', mime: 'application/pdf', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', status, at: '2026-11-06T00:00:00.000Z' };
+  }
+  check('Proof: the status ladder runs Bank-confirmed > match > self-checked > attached > mismatch > unconfirmed',
+    K.confirmationBadge({ confirmedBy: { source: 'bank-sms', at: 'x' }, proof: proofRecord('match') }).includes('✓ Bank-confirmed')
+    && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('match') }).includes('Statement matches')
+    && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('self-checked') }).includes('self-checked')
+    && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('attached') }).includes('Statement attached</span>')
+    && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('mismatch') }).includes("doesn't match this card")
+    && K.confirmationBadge({ confirmedBy: null, proof: null }).includes('Not confirmed yet')
+    && !K.confirmationBadge({ confirmedBy: null, proof: proofRecord('match') }).includes('verified'));
+  check('Proof: a new card with no proof is "Not confirmed yet"; a proof record is stored on the card',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, proof: proofRecord('match') });
+      const b = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '5678', balance: 0 });
+      return a.proof && a.proof.status === 'match' && b.proof === null
+        && K.confirmationBadge(b).includes('Not confirmed yet');
+    })());
+  check('Proof: a bad proof record is never stored (wrong kind / status / data URL)',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, proof: { kind: 'txt', name: 'x', dataUrl: 'data:text/plain;base64,aGVsbG8=', status: 'match' } });
+      const b = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '5678', balance: 0, proof: { kind: 'pdf', name: 'x', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', status: 'verified' } });
+      return a.proof === null && b.proof === null;
+    })());
+  check('Proof: removing proof clears the status back to unconfirmed — unless the card is bank-confirmed',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, proof: proofRecord('match') });
+      M.removeProof(v, a.id);
+      const backToUnconfirmed = a.proof === null && K.confirmationBadge(a).includes('Not confirmed yet');
+      const b = M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '9999', balance: 50000, proof: proofRecord('match') });
+      const d = S.parseSms('Rs 2,500.00 debited from your JazzCash account ••••9999 on 06-Nov-2026.');
+      I.applyIntelUpdate(v, d, b);
+      M.removeProof(v, b.id);
+      return backToUnconfirmed && b.proof === null && K.confirmationBadge(b).includes('✓ Bank-confirmed');
+    })());
+  check('Proof: renaming a card keeps its proof (provider/last-4 cannot change, so proof stays attached)',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000, proof: proofRecord('match') });
+      M.renameAccount(v, a.id, 'UBL Salary');
+      return a.proof && a.proof.status === 'match' && a.nickname === 'UBL Salary' && M.reconcile(v).ok;
+    })());
+  check('Proof: an old vault without proof fields loads as unconfirmed, and the proof survives an encrypted round-trip',
+    (await (async () => {
+      const v = M.emptyVault();
+      v.accounts.push({ id: 'old1', provider: 'UBL', type: 'debit', nickname: 'Old', last4: '1111', balance: 100, startingBalance: 100, createdAt: '2026-11-06T00:00:00.000Z' });
+      M.migrateVault(v);
+      if (v.accounts[0].proof !== null || !K.confirmationBadge(v.accounts[0]).includes('Not confirmed yet')) return false;
+      const w = M.emptyVault();
+      M.createAccount(w, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000, proof: proofRecord('self-checked') });
+      const made = await V.createVault('123456', 'my secret', w);
+      const back = await V.decryptVault(made.key, made.envelope);
+      return back.accounts[0].proof && back.accounts[0].proof.status === 'self-checked'
+        && K.confirmationBadge(back.accounts[0]).includes('self-checked');
+    })()) === true);
+
+  // ---- §9f (cont). Phase 3.3: proof UI structure ----
+  check('Proof UI: the Add page has the proof upload field, preview and self-check button',
+    pageHtml('add').includes('id="add-proof"') && pageHtml('add').includes('id="add-proof-status"')
+    && pageHtml('add').includes('id="add-proof-preview"') && pageHtml('add').includes('id="add-proof-img"')
+    && pageHtml('add').includes('id="add-proof-typed"') && pageHtml('add').includes('id="add-proof-selfcheck-btn"')
+    && pageHtml('add').includes('id="add-proof-error"')
+    && pageHtml('add').includes('I checked — this matches'));
+  check('Proof UI: the Add page note says a statement cannot prove a card, and screenshots are self-checked',
+    pageHtml('add').includes('id="add-honest-note"')
+    && pageHtml('add').includes('A statement is your own record of proof.')
+    && pageHtml('add').includes('it cannot prove a card is real')
+    && pageHtml('add').includes("A screenshot's text can't be read by the app — for screenshots, you check the match yourself."));
+  check('Proof UI: the card shows View proof + a two-tap Remove proof; the proof rides along on add',
+    appJs.includes('proofActionsHtml') && appJs.includes('class="proof-link"')
+    && appJs.includes('data-action="remove-proof"') && appJs.includes('data-action="confirm-remove-proof"')
+    && appJs.includes('pendingProofRemoveId') && appJs.includes('VaultModel.removeProof')
+    && appJs.includes('proof: state.addProof || null') && appJs.includes('onProofFile')
+    && appJs.includes('onProofSelfCheck'));
+  check('Proof UI: the self-check only happens on a deliberate tap — images never match automatically',
+    P.checkProofMatch('image', 'UBL 1234 Muhammad Hashir', ublCard, 'Muhammad Hashir') === 'image'
+    && appJs.includes("state.addProof.status = 'self-checked'")
+    && !appJs.includes("checkProofMatch('image'"));
+
+  // ---- §9g. Phase 4: monthly check (model) ----
+  check('Monthly: a vault that was never reconciled is due',
+    M.monthlyCheckDue(M.emptyVault(), '2026-11-06') === true);
+  check('Monthly: done within 30 days is not due; 30 days is due again; 31 days is due',
+    (() => {
+      const v = M.emptyVault();
+      v.lastReconcileAt = '2026-10-20';
+      const fresh = M.monthlyCheckDue(v, '2026-11-06') === false;
+      const thirty = M.monthlyCheckDue(v, '2026-11-19') === true;
+      const thirtyOne = M.monthlyCheckDue(v, '2026-11-20') === true;
+      return fresh && thirty && thirtyOne;
+    })());
+  check('Monthly: marking done sets today + the skipped count',
+    (() => {
+      const v = M.emptyVault();
+      const done = M.markMonthlyCheckDone(v, 2);
+      return done === M.todayStr() && v.lastReconcileAt === M.todayStr() && v.lastReconcileSkipped === 2
+        && M.monthlyCheckDue(v) === false;
+    })());
+  check('Monthly: only bank-confirmed or statement-matched accounts are ready; the rest are pending or skipped',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 1000 });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 2000, proof: proofRecord('match') });
+      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333', balance: 3000, proof: proofRecord('self-checked') });
+      const d = S.parseSms('Rs 100.00 debited from your HBL account ••••1111 on 06-Nov-2026.');
+      I.applyIntelUpdate(v, d, a);
+      const none = M.monthlyCheckStatus(v, {});
+      const skipped = M.monthlyCheckStatus(v, { [c.id]: true });
+      return M.accountCheckReady(a) === true && M.accountCheckReady(b) === true
+        && M.accountCheckReady(c) === false && none.ready === false && none.pending.length === 1
+        && none.pending[0].id === c.id && skipped.ready === true && skipped.skippedCount === 1;
+    })());
+  check('Monthly: last confirmed date comes from the bank SMS first, else the statement, else null',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'A', last4: '1111', balance: 1000 });
+      const b = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'B', last4: '2222', balance: 2000, proof: proofRecord('match') });
+      const c = M.createAccount(v, { provider: 'MCB', type: 'debit', nickname: 'C', last4: '3333', balance: 3000 });
+      const d = S.parseSms('Rs 100.00 debited from your HBL account ••••1111 on 06-Nov-2026.');
+      I.applyIntelUpdate(v, d, a);
+      return M.lastConfirmedAt(a) === M.todayStr() && M.lastConfirmedAt(b) === '2026-11-06'
+        && M.lastConfirmedAt(c) === null;
+    })());
+  check('Monthly: attachProof stores a valid record, rejects a bad one and an unknown account',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 1000 });
+      M.attachProof(v, a.id, proofRecord('match'));
+      const attached = a.proof && a.proof.status === 'match';
+      return attached
+        && throwsCode(function () { M.attachProof(v, a.id, { kind: 'txt', name: 'x', dataUrl: 'data:text/plain;base64,aGVsbG8=', status: 'match' }); }, 'VALIDATION')
+        && throwsCode(function () { M.attachProof(v, 'nope', proofRecord('match')); }, 'NOT_FOUND');
+    })());
+  check('Monthly: an old vault loads with lastReconcileAt null (check due)',
+    (() => {
+      const v = M.emptyVault();
+      delete v.lastReconcileAt;
+      delete v.lastReconcileSkipped;
+      M.migrateVault(v);
+      return v.lastReconcileAt === null && v.lastReconcileSkipped === 0 && M.monthlyCheckDue(v) === true;
+    })());
+
+  // ---- §9g (cont). Phase 4: monthly check UI structure ----
+  check('Monthly UI: the Wallet page has the due banner + the done line',
+    pageHtml('wallet').includes('id="monthly-banner"') && pageHtml('wallet').includes('id="monthly-banner-btn"')
+    && pageHtml('wallet').includes('Monthly check due')
+    && pageHtml('wallet').includes('id="monthly-done-line"') && pageHtml('wallet').includes('id="monthly-done-date"')
+    && pageHtml('wallet').includes('Monthly check done on'));
+  check('Monthly UI: the reconcile view lists accounts with badges, re-check actions, export + done buttons',
+    pageHtml('reconcile').includes('id="reconcile-card"') && pageHtml('reconcile').includes('id="reconcile-list"')
+    && pageHtml('reconcile').includes('id="reconcile-summary"') && pageHtml('reconcile').includes('id="reconcile-export-btn"')
+    && pageHtml('reconcile').includes('id="reconcile-done-btn"') && pageHtml('reconcile').includes('id="reconcile-error"')
+    && pageHtml('reconcile').includes('id="reconcile-ok"')
+    && pageHtml('reconcile').includes('Mark monthly check done'));
+  check('Monthly UI: the reconcile view is reached from the banner and the Backup page — NOT a sidebar button',
+    N.PAGES.includes('reconcile') && N.routeForHash('#/reconcile') === 'reconcile'
+    && !N.NAV_ORDER.some((n) => n.id === 'reconcile')
+    && pageHtml('backup').includes('href="#/reconcile"') && pageHtml('backup').includes('Monthly check'));
+  check('Monthly UI: the view reuses the SMS + statement flows and gates Mark-done on ready-or-skipped',
+    appJs.includes('renderReconcile') && appJs.includes('VaultModel.monthlyCheckDue')
+    && appJs.includes('VaultModel.monthlyCheckStatus') && appJs.includes('markMonthlyCheckDoneClick')
+    && appJs.includes('toggleReconcileSkip') && appJs.includes('onReconcileProof')
+    && appJs.includes("href=\"#/intelligence\"") && appJs.includes('Proof.checkProofMatch')
+    && appJs.includes('VaultModel.attachProof') && appJs.includes("reconcile-done-btn').disabled = !st.ready")
+    && appJs.includes('data-rec-skip'));
+  check('Monthly UI: the banner hides once the check is marked done (render toggles on monthlyCheckDue)',
+    appJs.includes("monthly-banner').classList.toggle('hidden', !due")
+    && appJs.includes("monthly-done-line').classList.toggle('hidden', due"));
+
   // 5e. Live smoke on a throwaway port (the real port 3036 is checked by hand below).
   const { spawn } = require('node:child_process');
   const TEST_PORT = 3037;
@@ -806,17 +1250,19 @@ async function main() {
     }
     check('Smoke: server comes up on a fresh port', up);
     check('Smoke: /health ok', (await req('GET', '/health')).status === 200);
-    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/sms.js', '/csv.js', '/cards.js', '/intel.js', '/totp.js', '/nav.js', '/app.js', '/bg.jpg']) {
+    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/sms.js', '/csv.js', '/cards.js', '/intel.js', '/proof.js', '/totp.js', '/nav.js', '/app.js', '/bg.jpg']) {
       check('Smoke: GET ' + p + ' -> 200', (await req('GET', p)).status === 200);
     }
     const home = await req('GET', '/');
     check('Smoke: homepage mentions the vault + no-recovery warning',
       home.raw.includes('Personal Card Vault') && home.raw.includes('No recovery, by design'));
-    check('Smoke: homepage loads all eight shared scripts',
+    check('Smoke: the monthly-check page is in the served HTML (hash route #/reconcile)',
+      home.raw.includes('id="page-reconcile"') && home.raw.includes('id="monthly-banner"'));
+    check('Smoke: homepage loads all nine shared scripts',
       home.raw.includes('/vault.js') && home.raw.includes('/model.js')
       && home.raw.includes('/sms.js') && home.raw.includes('/csv.js')
       && home.raw.includes('/cards.js') && home.raw.includes('/intel.js')
-      && home.raw.includes('/totp.js') && home.raw.includes('/nav.js'));
+      && home.raw.includes('/proof.js') && home.raw.includes('/totp.js') && home.raw.includes('/nav.js'));
     check('Smoke: unknown page -> 404', (await req('GET', '/nope.html')).status === 404);
   } finally {
     server.kill();
