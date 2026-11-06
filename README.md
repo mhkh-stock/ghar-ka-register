@@ -84,31 +84,45 @@ balance, updated through every transaction, with an in-app notification feed.
 A typed card is only a claim. The app marks every card with one status, in
 this order of strength:
 
-1. **✓ Bank-confirmed** — earned ONLY by a total-amount screenshot or a
-   bank statement PDF. NEVER by an SMS: a bank SMS can set the balance,
-   but it never verifies the card. (Total-amount screenshot verification
-   is not built yet — it needs on-device OCR — so today a matching
-   statement PDF is the only way to earn verification, at rung 2 below.)
+1. **✓ Screenshot verified** — a screenshot showing the total amount in
+   the account, read ON THIS DEVICE by the vendored OCR engine (the image
+   never leaves your phone or PC). Exactly one clear amount must be found;
+   otherwise nothing is set. NEVER by an SMS: a bank SMS can set the
+   balance, but it never verifies the card.
 2. **Statement matches** — a bank-statement PDF you uploaded, whose text
    the app checked for the bank name, the last 4 digits, and your profile
    name. This is the strongest proof the app can give today — and when a
    statement matches, its balance (if the statement carries one clear
    balance) becomes the card's balance too.
 3. **Statement attached — self-checked** — a screenshot you looked at
-   yourself next to the typed details and confirmed. The app cannot read
-   text from a screenshot; this is labelled as your check, not the app's.
+   yourself next to the typed details and confirmed. This is labelled as
+   your check, not the app's. (A total-amount screenshot is different:
+   the app reads its amount itself — see rung 1.)
 4. **Statement attached** — a file kept as your record (unreadable text).
 5. **Not confirmed yet** — typed by hand, no proof. A fake card stays here.
 
+Old "Bank-confirmed" badges earned by an SMS under the old rule are
+stripped when the vault loads — those cards must be re-verified by a
+total-amount screenshot or a statement PDF. The balance itself is never
+touched by the strip.
+
 Rules that keep the data honest: no two cards with the same bank + last 4;
 **a balance is never typed — not even at creation.** It is set only by a
-bank SMS or a statement (a forged statement can still carry a false
-balance — only a bank SMS is hard to fake). A saved card's balance can
-never be edited by hand — only a bank SMS, a statement, or a statement CSV
-can change it. You can rename a card, move it up or down, or delete it
-(two-tap confirm; deleting a card also removes its transactions). Old
-vaults keep their existing balances exactly as they are; new cards start
-with the balance unknown until a bank source sets it.
+bank SMS, a statement, or a total-amount screenshot (a forged statement
+or screenshot can still carry a false balance — only a bank SMS arriving
+from the bank is hard to fake). A saved card's balance can never be
+edited by hand — only a bank SMS, a statement, a total-amount screenshot,
+or a statement CSV can change it. You can rename a card, move it up or
+down, or delete it (two-tap confirm; deleting a card also removes its
+transactions). Old vaults keep their existing balances exactly as they
+are; new cards start with the balance unknown until a bank source sets
+it.
+
+**Intelligence screenshots:** when there is no time to paste an SMS, you
+can upload a screenshot of it instead. The app reads the text on the
+device and shows the same review card as pasting — nothing is saved
+until you approve it, and the amount is editable in case the read is
+wrong. An SMS screenshot updates the balance but never verifies a card.
 
 ## Monthly check
 
