@@ -1,0 +1,241 @@
+/* Personal Card Vault — Phase 2 reel look (Code XR "Glassy Payment Checkout
+   V2"): warm frosted-glass panels over a blurred warm living-room photo,
+   red-orange card visual, black pill buttons, green success accents.
+   Element IDs and flows are unchanged from Phase 1. */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  background: #ab8663 url("/bg.jpg") center / cover fixed;
+  color: #2b2118;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+/* ---- Glass panel (the reel's frosted panel) ---- */
+.glass, .card, .topbar, .review {
+  background: linear-gradient(135deg, rgba(255,252,246,.88), rgba(255,248,238,.72));
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  backdrop-filter: blur(18px) saturate(140%);
+  border: 1px solid rgba(255,255,255,.65);
+  border-radius: 20px;
+  box-shadow: 0 8px 32px rgba(60,40,20,.18), inset 0 1px 0 rgba(255,255,255,.7);
+}
+.card { padding: 18px; margin-bottom: 16px; }
+.card h2 { margin: 0 0 8px; font-size: 18px; color: #2b2118; }
+.card h3 { margin: 14px 0 6px; font-size: 15px; color: #2b2118; }
+
+/* ---- Top bar (reel header: logo | centre pill | status) ---- */
+header.topbar {
+  position: sticky; top: 12px; z-index: 20;
+  max-width: 1080px; margin: 12px auto 0; padding: 10px 16px;
+  display: flex; justify-content: space-between; align-items: center; gap: 12px;
+  border-radius: 999px;
+}
+.topbar .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.topbar .logo {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px;
+  background: linear-gradient(135deg, #16a34a, #14532d);
+  color: #fff; font-weight: 800; font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 2px 8px rgba(20,83,45,.4);
+}
+.topbar h1 { font-size: 17px; margin: 0; color: #2b2118; white-space: nowrap; }
+.topbar .centre-pill {
+  flex: 1 1 auto; text-align: center; font-size: 12px; color: #5f4c3a;
+  background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.6);
+  border-radius: 999px; padding: 6px 12px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.topbar .lock-pill {
+  flex: 0 0 auto; font-size: 12px; font-weight: 700;
+  background: #14532d; color: #fff; border-radius: 999px; padding: 6px 12px;
+  white-space: nowrap;
+}
+.topbar .lock-pill.locked { background: #7c2d12; }
+header .tag { font-size: 12px; color: #5f4c3a; }
+
+main { max-width: 1080px; margin: 0 auto; padding: 16px; }
+
+/* ---- Vault 3-column layout (reel: card | form | summary) ---- */
+.vault-grid { display: grid; grid-template-columns: 340px 1fr 320px; gap: 16px; align-items: start; }
+.vault-col { display: flex; flex-direction: column; min-width: 0; }
+.vault-col > .card { margin-bottom: 16px; }
+@media (max-width: 960px) {
+  .vault-grid { grid-template-columns: 1fr; }
+  .topbar .centre-pill { display: none; }
+  .topbar h1 { font-size: 15px; }
+}
+
+/* ---- Stepper (reel bottom pill: done = green check, current = black) ---- */
+.stepper {
+  position: sticky; bottom: 12px; z-index: 15;
+  display: flex; gap: 8px; align-items: center; justify-content: center;
+  padding: 8px; margin: 16px auto 0; max-width: 560px;
+}
+.stepper .step {
+  display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600;
+  color: #5f4c3a; padding: 6px 12px; border-radius: 999px; white-space: nowrap;
+}
+.stepper .step .dot {
+  width: 20px; height: 20px; border-radius: 50%; flex: 0 0 auto;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 11px; background: rgba(255,255,255,.6); color: #5f4c3a;
+  border: 1px solid rgba(95,76,58,.4);
+}
+.stepper .step.done { color: #14532d; }
+.stepper .step.done .dot { background: #14532d; color: #fff; border-color: #14532d; }
+.stepper .step.active { background: #111827; color: #fff; }
+.stepper .step.active .dot { background: #fff; color: #111827; border-color: #fff; }
+.stepper .sep { color: #a08b74; font-size: 12px; }
+
+/* ---- Card carousel (reel's red-orange VISA card, per-provider colours) ---- */
+.carousel {
+  display: flex; gap: 0; overflow-x: auto; scroll-snap-type: x mandatory;
+  padding: 8px 2px 16px; scrollbar-width: thin;
+}
+.card-visual {
+  flex: 0 0 292px; scroll-snap-align: center; cursor: pointer;
+  aspect-ratio: 1.586; border-radius: 18px; padding: 16px 18px; color: #fff;
+  display: flex; flex-direction: column; justify-content: space-between;
+  box-shadow: 0 10px 28px rgba(60,30,10,.35), inset 0 1px 0 rgba(255,255,255,.35);
+  transform: scale(.94); opacity: .85; transition: transform .25s ease, opacity .25s ease, box-shadow .25s ease;
+  position: relative; overflow: hidden;
+  margin-left: -18px;
+}
+.card-visual:first-child { margin-left: 0; }
+.card-visual.selected { transform: scale(1); opacity: 1; box-shadow: 0 16px 36px rgba(60,30,10,.45), inset 0 1px 0 rgba(255,255,255,.4); }
+.card-visual::after { /* soft reel highlight, top-left sheen */
+  content: ""; position: absolute; inset: 0; pointer-events: none;
+  background: radial-gradient(120% 90% at 15% 0%, rgba(255,255,255,.28), transparent 55%);
+}
+.card-visual .cv-top { display: flex; justify-content: space-between; align-items: flex-start; }
+.card-visual .cv-chip {
+  width: 44px; height: 32px; border-radius: 7px;
+  background: linear-gradient(135deg, #fde68a, #d97706 55%, #fbbf24);
+  box-shadow: inset 0 0 0 1px rgba(120,60,0,.35);
+}
+.card-visual .cv-provider { font-size: 13px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+.card-visual .cv-type { font-size: 11px; opacity: .85; text-align: right; }
+.card-visual .cv-num { font-size: 19px; letter-spacing: .12em; font-weight: 600; text-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.card-visual .cv-bottom { display: flex; justify-content: space-between; align-items: flex-end; gap: 8px; }
+.card-visual .cv-holder { font-size: 12px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-visual .cv-bal { font-size: 18px; font-weight: 800; white-space: nowrap; text-shadow: 0 1px 2px rgba(0,0,0,.25); }
+.card-visual .cv-tap { font-size: 11px; opacity: .8; }
+.card-visual.success { background: linear-gradient(135deg, #15803d, #14532d) !important; }
+/* Provider gradients — white text on every stop passes WCAG AA (checked in test.js §6). */
+.card-default { background: linear-gradient(135deg, #b91c1c, #9a3412); }
+.card-hbl { background: linear-gradient(135deg, #1d4ed8, #1e40af); }
+.card-meezan { background: linear-gradient(135deg, #0f766e, #115e59); }
+.card-ubl { background: linear-gradient(135deg, #1e3a8a, #172554); }
+.card-mcb { background: linear-gradient(135deg, #7c2d12, #431407); }
+.card-allied { background: linear-gradient(135deg, #065f46, #064e3b); }
+.card-bank-alfalah { background: linear-gradient(135deg, #9f1239, #881337); }
+.card-askari { background: linear-gradient(135deg, #365314, #1a2e05); }
+.card-faysal { background: linear-gradient(135deg, #0e7490, #155e75); }
+.card-js { background: linear-gradient(135deg, #6d28d9, #5b21b6); }
+.card-standard-chartered { background: linear-gradient(135deg, #1e40af, #1e3a8a); }
+.card-nbp { background: linear-gradient(135deg, #166534, #14532d); }
+.card-bop { background: linear-gradient(135deg, #92400e, #78350f); }
+.card-sadapay { background: linear-gradient(135deg, #0f766e, #134e4a); }
+.card-nayapay { background: linear-gradient(135deg, #be185d, #9d174d); }
+.card-zindigi { background: linear-gradient(135deg, #854d0e, #713f12); }
+.card-easypaisa { background: linear-gradient(135deg, #15803d, #166534); }
+.card-jazzcash { background: linear-gradient(135deg, #b91c1c, #991b1b); }
+.card-payoneer { background: linear-gradient(135deg, #92400e, #78350f); }
+.card-custom { background: linear-gradient(135deg, #44403c, #292524); }
+
+/* ---- Forms (reel "Payment details" panel) ---- */
+label { display: block; font-size: 13px; font-weight: 600; margin: 10px 0 4px; color: #2b2118; }
+input, select, textarea {
+  width: 100%; padding: 11px 12px; font-size: 16px; color: #2b2118;
+  border: 1px solid rgba(120,90,60,.35); border-radius: 12px;
+  background: rgba(255,255,255,.6);
+}
+input:focus, select:focus, textarea:focus {
+  outline: 2px solid #14532d; outline-offset: 0; border-color: #14532d;
+  background: rgba(255,255,255,.85);
+}
+button {
+  padding: 12px 20px; font-size: 15px; font-weight: 700; border: none;
+  border-radius: 999px; background: #111827; color: #fff; cursor: pointer; margin-top: 12px;
+  box-shadow: 0 4px 14px rgba(17,24,39,.35);
+}
+button.secondary { background: rgba(255,255,255,.65); color: #2b2118; box-shadow: none; border: 1px solid rgba(120,90,60,.35); }
+button.danger { background: #b91c1c; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+button.small { padding: 7px 12px; font-size: 13px; margin-top: 0; }
+/* Green toggle (reel "Save card for next time") — used by Hide/Show balances. */
+.toggle-btn { background: rgba(255,255,255,.65); color: #2b2118; border: 1px solid rgba(120,90,60,.35); box-shadow: none; }
+.toggle-btn.on { background: #14532d; color: #fff; border-color: #14532d; }
+
+.muted { color: #5f4c3a; font-size: 13px; }
+.error { color: #991b1b; font-size: 14px; min-height: 20px; margin-top: 8px; }
+.ok { color: #14532d; font-size: 14px; min-height: 20px; margin-top: 8px; }
+.warn {
+  background: rgba(254,243,199,.85); border: 1px solid rgba(180,83,9,.5);
+  border-radius: 12px; padding: 10px 12px; font-size: 14px; color: #2b2118;
+}
+.hidden { display: none !important; }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.row > * { flex: 1; min-width: 120px; }
+.badges { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+
+/* ---- Intelligence result (reel green success style) ---- */
+.intel-result {
+  background: linear-gradient(135deg, rgba(21,128,61,.16), rgba(20,83,45,.08));
+  border: 1px solid rgba(20,83,45,.45); border-radius: 14px;
+  padding: 12px 14px; margin-top: 10px; font-size: 14px; color: #14532d;
+}
+.intel-result .big { font-size: 16px; font-weight: 800; color: #14532d; }
+.intel-result .cross { color: #5f4c3a; font-size: 13px; }
+.intel-result button { margin-top: 8px; }
+
+/* ---- Summary rows (reel "Order summary" panel) ---- */
+.sum-row { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid rgba(120,90,60,.18); font-size: 14px; }
+.sum-row:last-child { border-bottom: none; }
+.sum-row .mark {
+  flex: 0 0 auto; width: 34px; height: 34px; border-radius: 10px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px; font-weight: 800; color: #fff;
+}
+.sum-row .nm { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sum-row .nm .sub { display: block; font-size: 12px; color: #5f4c3a; }
+.sum-row .amt { font-weight: 700; white-space: nowrap; color: #2b2118; }
+.sum-total { display: flex; justify-content: space-between; font-size: 16px; font-weight: 800; padding-top: 10px; margin-top: 6px; border-top: 2px solid rgba(43,33,24,.25); color: #2b2118; }
+
+.txn, .notif { border-bottom: 1px solid rgba(120,90,60,.18); padding: 8px 0; font-size: 14px; }
+.txn .amt { font-weight: 700; }
+.pill { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; background: rgba(255,255,255,.65); color: #2b2118; }
+.pill.green { background: #14532d; color: #fff; }
+.pill.amber { background: #7c2d12; color: #fff; }
+.review { border: 2px dashed rgba(95,76,58,.5); border-radius: 14px; padding: 12px; margin-top: 10px; }
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid rgba(120,90,60,.18); }
+
+/* ---- Securing overlay (reel state 2 → 3) ---- */
+.securing-overlay {
+  position: fixed; inset: 0; z-index: 50;
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+  background: rgba(43,33,24,.28);
+  -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  padding: 20px; text-align: center;
+}
+.securing-overlay .card-visual { flex: 0 0 auto; width: min(340px, 86vw); transform: none; opacity: 1; cursor: default; }
+.securing-overlay .card-visual.shimmer::before {
+  content: ""; position: absolute; top: 0; bottom: 0; width: 40%;
+  background: linear-gradient(105deg, transparent, rgba(255,255,255,.45), transparent);
+  animation: shimmer 1.2s ease-in-out infinite;
+}
+@keyframes shimmer { from { left: -45%; } to { left: 105%; } }
+.securing-overlay .sec-title { font-size: 20px; font-weight: 800; color: #fff; text-shadow: 0 2px 8px rgba(0,0,0,.35); margin: 0; }
+.securing-overlay .sec-sub { font-size: 14px; color: rgba(255,255,255,.9); text-shadow: 0 1px 4px rgba(0,0,0,.35); margin: 0; }
+.sec-progress { width: min(300px, 80vw); height: 4px; border-radius: 999px; background: rgba(255,255,255,.35); overflow: hidden; }
+.sec-progress > div { height: 100%; width: 0; background: #22c55e; border-radius: 999px; transition: width 1.3s ease; }
+.securing-overlay.done .sec-progress > div { width: 100%; background: #16a34a; }
+
+@media (max-width: 560px) {
+  main { padding: 12px; }
+  .card-visual { flex-basis: 272px; }
+  .topbar h1 { font-size: 15px; }
+}
