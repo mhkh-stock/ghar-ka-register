@@ -1,8 +1,10 @@
-/* Personal Card Vault — Phase 2 reel look (Code XR "Glassy Payment Checkout
+/* Personal Card Vault — Phase 3 reel look (Code XR "Glassy Payment Checkout
    V2"): warm frosted-glass panels over a blurred warm living-room photo,
    red-orange card visual, black pill buttons, green success accents.
-   Element IDs and flows are unchanged from Phase 1. */
+   Phase 3 adds the sidebar + one page per job. Element IDs and flows are
+   unchanged from Phase 1/2 except where Phase 3 moved them. */
 * { box-sizing: border-box; }
+html { scroll-padding-top: 96px; }
 body {
   margin: 0;
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -53,25 +55,88 @@ header.topbar {
   white-space: nowrap;
 }
 .topbar .lock-pill.locked { background: #7c2d12; }
+.topbar .profile-chip {
+  flex: 0 0 auto; display: flex; align-items: center; gap: 8px;
+  font-size: 13px; font-weight: 700; color: #2b2118; white-space: nowrap;
+  background: rgba(255,255,255,.55); border: 1px solid rgba(255,255,255,.6);
+  border-radius: 999px; padding: 3px 12px 3px 3px;
+}
 header .tag { font-size: 12px; color: #5f4c3a; }
 
-main { max-width: 1080px; margin: 0 auto; padding: 16px; }
+/* Top padding + scroll margins: content must never hide under the sticky
+   top bar (a real defect in Hashir's screenshot — "Your cards" was cut off). */
+main { max-width: 1080px; margin: 0 auto; padding: 24px 16px 16px; }
 
-/* ---- Vault 3-column layout (reel: card | form | summary) ---- */
-.vault-grid { display: grid; grid-template-columns: 340px 1fr 320px; gap: 16px; align-items: start; }
-.vault-col { display: flex; flex-direction: column; min-width: 0; }
-.vault-col > .card { margin-bottom: 16px; }
+/* ---- Phase 3 shell: sidebar + one page per job ---- */
+.app-shell { display: flex; gap: 16px; align-items: flex-start; }
+.app-content { flex: 1 1 auto; min-width: 0; }
+.page { scroll-margin-top: 96px; }
+.wallet-grid { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
+.wallet-side { display: flex; flex-direction: column; min-width: 0; }
+.wallet-side > .card { margin-bottom: 16px; }
+#wallet-add-btn { width: 100%; padding: 14px; font-size: 16px; margin: 0 0 16px; }
+.back-link { display: inline-block; margin: 2px 0 12px; font-weight: 700; color: #14532d; text-decoration: none; font-size: 14px; }
+
+/* Sidebar (transparent frosted glass, same reel design). Buttons in
+   Hashir's exact order: Wallet, Add Card, Intelligence, Security,
+   Backup & Import, Profile — plus the bell. Active button = black pill. */
+#sidebar {
+  position: sticky; top: 84px; flex: 0 0 230px;
+  padding: 14px; z-index: 10;
+}
+.sidebar-profile { display: flex; align-items: center; gap: 10px; padding: 4px 6px 12px; border-bottom: 1px solid rgba(120,90,60,.18); }
+.sidebar-name-wrap { display: flex; flex-direction: column; min-width: 0; }
+.sidebar-name { font-weight: 800; font-size: 15px; color: #2b2118; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#sidebar-nav { margin-top: 10px; }
+.nav-btn {
+  display: flex; align-items: center; gap: 10px; width: 100%;
+  background: transparent; box-shadow: none; border: 1px solid transparent;
+  color: #2b2118; margin-top: 6px; padding: 11px 14px; text-align: left;
+  font-size: 15px;
+}
+.nav-btn:hover { background: rgba(255,255,255,.55); }
+.nav-btn.active { background: #111827; color: #fff; }
+.bell-btn { position: relative; margin-top: 12px; border-top: 1px solid rgba(120,90,60,.18); border-radius: 0; padding-top: 14px; }
+.badge {
+  margin-left: auto; background: #b91c1c; color: #fff; border-radius: 999px;
+  font-size: 11px; font-weight: 800; padding: 2px 8px; line-height: 1.4;
+}
+/* DP photo + initials placeholder (sidebar, top bar, profile page). */
+.dp-img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex: 0 0 auto; }
+.dp-img.small { width: 28px; height: 28px; }
+.dp-img.large { width: 96px; height: 96px; }
+.dp-initials {
+  width: 44px; height: 44px; border-radius: 50%; flex: 0 0 auto;
+  background: linear-gradient(135deg, #16a34a, #14532d); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 18px;
+}
+.dp-initials.small { width: 28px; height: 28px; font-size: 13px; }
+.dp-initials.large { width: 96px; height: 96px; font-size: 38px; }
+/* Notification dropdown (opens from the bell; not a page). */
+.notif-panel {
+  position: fixed; top: 76px; right: 16px; z-index: 60;
+  width: min(380px, calc(100vw - 32px)); max-height: 70vh; overflow-y: auto;
+  padding: 16px;
+}
 @media (max-width: 960px) {
-  .vault-grid { grid-template-columns: 1fr; }
+  .wallet-grid { grid-template-columns: 1fr; }
   .topbar .centre-pill { display: none; }
   .topbar h1 { font-size: 15px; }
+  /* Narrow screens: the sidebar becomes an icon rail — the bell stays visible. */
+  #sidebar { flex-basis: 64px; padding: 10px 6px; top: 76px; }
+  #sidebar .nav-label, #sidebar .sidebar-name-wrap { display: none; }
+  #sidebar .nav-btn { justify-content: center; padding: 11px 6px; }
+  #sidebar .badge { position: absolute; top: 2px; right: 2px; margin-left: 0; }
+  #sidebar .sidebar-profile { justify-content: center; padding-bottom: 10px; }
 }
 
-/* ---- Stepper (reel bottom pill: done = green check, current = black) ---- */
+/* ---- Stepper (reel bottom pill: done = green check, current = black).
+   Phase 3: in the normal flow at the bottom of the Wallet page only — it
+   is never sticky, so it can never overlap a form. */
 .stepper {
-  position: sticky; bottom: 12px; z-index: 15;
   display: flex; gap: 8px; align-items: center; justify-content: center;
-  padding: 8px; margin: 16px auto 0; max-width: 560px;
+  padding: 8px; margin: 0 auto; max-width: 560px;
 }
 .stepper .step {
   display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600;
@@ -235,7 +300,8 @@ th, td { text-align: left; padding: 6px 4px; border-bottom: 1px solid rgba(120,9
 .securing-overlay.done .sec-progress > div { width: 100%; background: #16a34a; }
 
 @media (max-width: 560px) {
-  main { padding: 12px; }
+  main { padding: 20px 12px 12px; }
   .card-visual { flex-basis: 272px; }
   .topbar h1 { font-size: 15px; }
+  .topbar .profile-chip span:last-child { display: none; }
 }
