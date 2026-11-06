@@ -88,6 +88,13 @@
       <div class="app-content">
         <!-- WALLET — only "Your cards" + "Summary" (+ Recent activity, part of the summary) -->
         <section class="page" id="page-wallet">
+          <!-- Monthly check reminder (Phase 4): a glass banner when the check
+               is due, a small muted line when it was done in the last 30 days. -->
+          <div id="monthly-banner" class="glass hidden">
+            <strong>Monthly check due</strong> — upload this month's statements to re-check your balances, and export a backup.
+            <button id="monthly-banner-btn">Open monthly check</button>
+          </div>
+          <p id="monthly-done-line" class="muted hidden">Monthly check done on <span id="monthly-done-date"></span><span id="monthly-done-skipped"></span></p>
           <div class="wallet-grid">
             <div class="card" id="accounts-card">
               <div class="row">
@@ -115,6 +122,24 @@
                 <p id="txns-empty" class="muted">No transactions yet.</p>
               </div>
             </div>
+          </div>
+          <!-- Rename a card (Phase 3.2, revised by Hashir's rule): the nickname
+               is the user's own label — the only thing a hand may change.
+               Provider and last-4 identify the card (read-only). There is
+               deliberately NO balance or type field here: a saved card's
+               data can only be changed by a bank SMS, never by typing. -->
+          <div class="card hidden" id="edit-account-card">
+            <h2>Rename card</h2>
+            <p class="muted">Only the nickname can be changed — it is your own label for the card. The balance and type can only change when your bank says so (a bank SMS, a statement import, or a matching statement).</p>
+            <div class="row">
+              <div><label>Provider</label><input id="edit-provider" type="text" readonly></div>
+              <div><label>Last 4 digits</label><input id="edit-last4" type="text" readonly></div>
+            </div>
+            <label for="edit-nick">Nickname</label>
+            <input id="edit-nick" type="text" maxlength="40">
+            <div class="row"><button id="edit-save-btn">Save name</button><button id="edit-cancel-btn" class="secondary">Cancel</button></div>
+            <div id="edit-account-error" class="error"></div>
+            <div id="edit-account-ok" class="ok"></div>
           </div>
           <button id="wallet-add-btn">＋ Add card</button>
           <!-- Stepper lives on the Wallet page only, in the normal flow — it can never overlap a form -->
@@ -148,10 +173,22 @@
             <label for="add-nick">Nickname</label>
             <input id="add-nick" type="text" maxlength="40" placeholder="e.g. HBL Salary, JazzCash daily">
             <label for="add-balance">Starting balance (PKR)</label>
-            <input id="add-balance" type="number" min="0" step="1" placeholder="e.g. 150000">
+            <input id="add-balance" type="number" step="1" placeholder="e.g. 150000">
+            <label for="add-proof">Proof — upload your bank statement (PDF or photo, optional)</label>
+            <input id="add-proof" type="file" accept=".pdf,image/*">
+            <div id="add-proof-status" class="muted"></div>
+            <div id="add-proof-preview" class="hidden">
+              <img id="add-proof-img" alt="Your uploaded statement">
+              <p class="muted">Check it against what you typed — provider, last 4 digits, and your profile name:</p>
+              <div id="add-proof-typed" class="muted"></div>
+              <button id="add-proof-selfcheck-btn" class="secondary" type="button">I checked — this matches</button>
+              <p class="muted">The app can't read text from a screenshot — you checked this yourself.</p>
+            </div>
+            <div id="add-proof-error" class="error"></div>
             <button id="add-account-btn">Add account</button>
             <div id="add-account-error" class="error"></div>
             <div id="add-account-ok" class="ok"></div>
+            <p class="muted" id="add-honest-note">We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan. An account becomes bank-confirmed when a real SMS from your bank updates it in Intelligence. A statement is your own record of proof. It is checked only against the bank name, last 4 digits and your profile name — it cannot prove a card is real. Only a real SMS from your bank does that. A screenshot's text can't be read by the app — for screenshots, you check the match yourself.</p>
           </div>
 
           <div class="card" id="connect-card">
@@ -303,6 +340,7 @@
                 <input id="import-file" type="file" accept=".json,application/json">
               </label>
             </div>
+            <p class="muted"><a href="#/reconcile">Monthly check</a> — re-check your balances against this month's statements, and export a backup.</p>
             <div id="backup-error" class="error"></div>
             <div id="backup-ok" class="ok"></div>
           </div>
@@ -363,6 +401,25 @@
             <div id="profile-ok" class="ok"></div>
           </div>
         </section>
+
+        <!-- MONTHLY CHECK (Phase 4): reconcile + backup ritual. Reached from
+             the Wallet banner and the Backup page — NOT a sidebar button. -->
+        <section class="page hidden" id="page-reconcile">
+          <a class="back-link" href="#/wallet">← Back to Wallet</a>
+          <div class="card" id="reconcile-card">
+            <h2>Monthly check</h2>
+            <p class="muted">Re-check every card against this month's bank SMS or statement, then export a backup. A card counts as checked when a real bank SMS confirmed it or a statement matched it — or when you skip it on purpose (skips are shown plainly).</p>
+            <div id="reconcile-list"></div>
+            <p id="reconcile-empty" class="muted">No accounts yet — add a card first.</p>
+            <div id="reconcile-summary" class="muted"></div>
+            <div class="row">
+              <button id="reconcile-export-btn">Export encrypted backup</button>
+              <button id="reconcile-done-btn">Mark monthly check done</button>
+            </div>
+            <div id="reconcile-error" class="error"></div>
+            <div id="reconcile-ok" class="ok"></div>
+          </div>
+        </section>
       </div>
     </div>
 
@@ -392,6 +449,7 @@
 <script src="/csv.js"></script>
 <script src="/cards.js"></script>
 <script src="/intel.js"></script>
+<script src="/proof.js"></script>
 <script src="/totp.js"></script>
 <script src="/nav.js"></script>
 <script src="/app.js"></script>
