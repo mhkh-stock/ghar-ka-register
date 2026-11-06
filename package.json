@@ -1,0 +1,1 @@
+{"name":"personal-card-vault","private":true,"scripts":{"start":"node server.js","test":"node test.js"},"version":"1.0.0"}
