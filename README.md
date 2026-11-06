@@ -15,7 +15,8 @@ balance, updated through every transaction, with an in-app notification feed.
   PIN → PBKDF2 (600,000 iterations, SHA-256) → AES-256-GCM encrypts the
   whole vault at rest. No PIN = no data, even if someone copies the files.
 - **Never stored:** full card numbers, CVV, card PIN, expiry, bank passwords.
-  Only the last 4 digits + provider + nickname + type + balance.
+  Only the last 4 digits + provider + nickname + type + balance (the
+  balance is set only by the bank — never typed).
 - **Auto-lock** after 5 minutes without use (changeable to 1 or 15 minutes
   in Security settings); hide-balances eye toggle; 5 wrong PINs → growing
   lockout delay (30s, doubling, cap 15 min).
@@ -54,8 +55,11 @@ balance, updated through every transaction, with an in-app notification feed.
 
 ## How an account gets added
 
-1. **Manual add** — provider → type → nickname → last 4 digits → starting
-   balance → done.
+1. **Manual add** — provider → type → nickname → last 4 digits → done.
+   There is NO balance field: **a balance is never typed** — not even at
+   creation. A new card starts with its balance unknown ("Balance not set
+   yet"). It is set only by your bank — paste a bank SMS (Intelligence) or
+   upload a statement (here, or in the monthly check).
 2. **Intelligence — paste a bank SMS, the wallet updates itself** — on the
    Intelligence page, paste the transaction SMS (money cut OR received). The
    parser reads the amount, direction, merchant, date, available balance
@@ -64,11 +68,15 @@ balance, updated through every transaction, with an in-app notification feed.
    amount entry, no account picking — and the result shows inline
    ("JazzCash ••1234 updated: −Rs 2,500 → new balance Rs 47,500", plus a
    cross-check against the bank's available balance and an Undo button).
-   If no account matches, or several do, it falls back to the review card
-   with the account picker — nothing is saved until approved. Garbage, OTPs
-   and amount-less messages change nothing.
+   If the card's balance was never set and the SMS states an available
+   balance, that number IS the balance now ("balance set from this SMS").
+   If the SMS states no available balance, the balance stays unknown and
+   the result says so plainly. If no account matches, or several do, it
+   falls back to the review card with the account picker — nothing is saved
+   until approved. Garbage, OTPs and amount-less messages change nothing.
 3. **CSV import** — upload a statement, map columns, duplicates flagged,
-   review every row, approve.
+   review every row, approve. Statement rows are bank data, so they set
+   balances from the statement.
 4. **Connect bank** — "coming when SBP open banking goes live" placeholder.
 
 ## Verification — how a card earns trust
@@ -76,11 +84,16 @@ balance, updated through every transaction, with an in-app notification feed.
 A typed card is only a claim. The app marks every card with one status, in
 this order of strength:
 
-1. **✓ Bank-confirmed** — only a real SMS from your bank (pasted in
-   Intelligence) can set this. It is the strongest proof the app has.
+1. **✓ Bank-confirmed** — earned ONLY by a total-amount screenshot or a
+   bank statement PDF. NEVER by an SMS: a bank SMS can set the balance,
+   but it never verifies the card. (Total-amount screenshot verification
+   is not built yet — it needs on-device OCR — so today a matching
+   statement PDF is the only way to earn verification, at rung 2 below.)
 2. **Statement matches** — a bank-statement PDF you uploaded, whose text
    the app checked for the bank name, the last 4 digits, and your profile
-   name.
+   name. This is the strongest proof the app can give today — and when a
+   statement matches, its balance (if the statement carries one clear
+   balance) becomes the card's balance too.
 3. **Statement attached — self-checked** — a screenshot you looked at
    yourself next to the typed details and confirmed. The app cannot read
    text from a screenshot; this is labelled as your check, not the app's.
@@ -88,10 +101,14 @@ this order of strength:
 5. **Not confirmed yet** — typed by hand, no proof. A fake card stays here.
 
 Rules that keep the data honest: no two cards with the same bank + last 4;
-a debit/wallet/bank balance can never be negative; **a saved card's balance
-can never be edited by hand** — only a bank SMS, a statement, or a statement
-CSV can change it. You can rename a card, move it up or down, or delete it
-(two-tap confirm; deleting a card also removes its transactions).
+**a balance is never typed — not even at creation.** It is set only by a
+bank SMS or a statement (a forged statement can still carry a false
+balance — only a bank SMS is hard to fake). A saved card's balance can
+never be edited by hand — only a bank SMS, a statement, or a statement CSV
+can change it. You can rename a card, move it up or down, or delete it
+(two-tap confirm; deleting a card also removes its transactions). Old
+vaults keep their existing balances exactly as they are; new cards start
+with the balance unknown until a bank source sets it.
 
 ## Monthly check
 

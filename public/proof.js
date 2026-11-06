@@ -157,6 +157,65 @@ function checkProofMatch(kind, text, account, profileName) {
   return missingProofTerms(kind, text, account, profileName).length === 0 ? 'match' : 'mismatch';
 }
 
+// Best-effort balance out of a statement's readable text (Phase 3.5).
+// Looks for "available balance" / "closing balance" / "balance" with an
+// amount next to it. A strong match carries a currency marker (Rs/PKR);
+// without one, a bare number only counts when it looks like money (a
+// thousands comma, a decimal, or at least Rs 100) — "Balance as on
+// 06-Nov-2026" must never be read as a balance of Rs 6. "Opening" and
+// "minimum" balances are never counted — they are not the balance now.
+// Returns { status: 'one', amount, label, match } when exactly ONE
+// distinct amount is found (match = the line it was read from, so the user
+// can see what the app read), { status: 'none' } when nothing clear is
+// found, and { status: 'ambiguous', amounts } when several different
+// amounts are found. Never guesses: 'none' / 'ambiguous' set no balance.
+// Images carry no readable text (no OCR) — they never reach this function.
+function parseBalanceAmount(s) {
+  const n = parseFloat(String(s).replace(/,/g, ''));
+  if (!Number.isFinite(n)) return null;
+  if (Math.abs(n) > 1e12) return null;
+  return Math.round(n);
+}
+function collectBalanceMatches(text, requireCurrency) {
+  const found = [];
+  const amt = requireCurrency
+    ? '(?:rs\\.?|pkr)\\s*(-?[\\d,]+(?:\\.\\d{1,2})?)'
+    : '(-?[\\d,]+(?:\\.\\d{1,2})?)';
+  const patterns = [
+    { re: new RegExp('(available|closing)\\s+balance.{0,60}?' + amt, 'gi'), labelFor: (m) => m[1][0].toUpperCase() + m[1].slice(1).toLowerCase() + ' Balance' },
+    { re: new RegExp('(?<!available\\s)(?<!closing\\s)(?<!opening\\s)(?<!minimum\\s)\\bbalance\\b.{0,60}?' + amt, 'gi'), labelFor: () => 'Balance' },
+  ];
+  for (const p of patterns) {
+    let m;
+    while ((m = p.re.exec(text)) !== null) {
+      const amount = parseBalanceAmount(m[m.length - 1]);
+      if (amount === null) continue;
+      if (!requireCurrency) {
+        const raw = m[m.length - 1];
+        const looksLikeMoney = raw.indexOf(',') >= 0 || raw.indexOf('.') >= 0 || Math.abs(amount) >= 100;
+        if (!looksLikeMoney) continue;
+      }
+      found.push({ label: p.labelFor(m), amount: amount, match: m[0].replace(/\s+/g, ' ').trim() });
+    }
+  }
+  return found;
+}
+function extractStatementBalance(text) {
+  const t = String(text || '');
+  if (!t.trim()) return { status: 'none' };
+  let found = collectBalanceMatches(t, true);
+  if (found.length === 0) found = collectBalanceMatches(t, false);
+  const distinct = [];
+  for (const f of found) {
+    if (!distinct.some((d) => d.amount === f.amount)) distinct.push(f);
+  }
+  if (distinct.length === 0) return { status: 'none' };
+  if (distinct.length === 1) {
+    return { status: 'one', amount: distinct[0].amount, label: distinct[0].label, match: distinct[0].match };
+  }
+  return { status: 'ambiguous', amounts: distinct.slice(0, 3).map((d) => d.amount) };
+}
+
 // A proof record is only what the UI built from a validated upload.
 function isValidProofRecord(proof) {
   if (!proof || typeof proof !== 'object') return false;
@@ -171,6 +230,7 @@ if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     MAX_PROOF_BYTES, detectProofKind, validateProofData, extractPdfText,
     containsTerm, missingProofTerms, checkProofMatch, isValidProofRecord,
+    extractStatementBalance,
     dataUrlToBytes,
   };
 }
@@ -178,6 +238,7 @@ if (typeof window !== 'undefined') {
   window.Proof = {
     MAX_PROOF_BYTES, detectProofKind, validateProofData, extractPdfText,
     containsTerm, missingProofTerms, checkProofMatch, isValidProofRecord,
+    extractStatementBalance,
     dataUrlToBytes,
   };
 }

@@ -70,7 +70,12 @@ function buildCardVisual(account, opts) {
   const cls = providerClass(a.provider);
   const last4 = String(a.last4 || '');
   const num = last4 ? '•••• ' + last4 : '•••• ••••';
-  const bal = o.hideBalances ? 'Rs ••••' : fmtRs(a.balance);
+  // Unknown balance (Phase 3.5): the card says so plainly — never "Rs 0"
+  // for a number the bank never stated. Hide-balances only masks a real
+  // number; an unknown balance has nothing to hide.
+  const bal = (a.balance === null || a.balance === undefined)
+    ? 'Balance not set yet'
+    : (o.hideBalances ? 'Rs ••••' : fmtRs(a.balance));
   return '<div class="card-visual ' + cls + (o.selected ? ' selected' : '')
     + (o.success ? ' success' : '') + '" data-id="' + esc(a.id || '')
     + '" role="button" tabindex="0">'

@@ -29,21 +29,33 @@ function fmtRs(n) { return 'Rs ' + Number(n || 0).toLocaleString('en-PK'); }
 // (kept so Undo can remove exactly that notification).
 function applyIntelUpdate(vault, draft, account) {
   const prevBalance = account.balance;
-  const wasConfirmed = VaultModel.isBankConfirmed(account);
+  // Baseline from the bank (Phase 3.5): remember whether the balance was
+  // unknown before this SMS — if it was, and the SMS states an available
+  // balance, that number IS the balance now (see below).
+  const wasUnknown = !VaultModel.isBalanceKnown(account);
   const txn = VaultModel.addTransaction(vault, {
     accountId: account.id, amount: draft.amount, direction: draft.direction,
     merchant: draft.merchant, date: draft.date, source: 'sms',
   });
   const before = vault.notifications.length;
   VaultModel.approveTransaction(vault, txn.id);
-  // Bank-confirmed (Phase 3.1): a real bank SMS matched this exact account —
-  // the only proof an app can have in Pakistan today. Sticky: Undo reverses
-  // the balance change only, never this confirmation — the bank SMS itself
-  // was real. Only this direct-match path confirms; the review fallback,
-  // manual entry and CSV import never call this function.
-  VaultModel.markAccountBankConfirmed(vault, account.id);
+  // An SMS NEVER confirms a card (Hashir's rule, 2026-11-06): it can set
+  // the balance — it is bank data — but the "Bank-confirmed" badge is
+  // earned ONLY by a total-amount screenshot or a bank statement PDF.
+  // confirmedBy is never set here, on purpose. Only this direct-match
+  // path and the review fallback update from an SMS; neither confirms.
+  // Baseline from the bank (Phase 3.5): if the balance was never set and
+  // this SMS states an available balance, set the baseline from it. The
+  // back-computed starting balance accounts for this transaction, so
+  // reconcile() stays clean. No available balance in the SMS → the balance
+  // stays unknown; the transaction is still recorded.
+  let baselineSet = false;
+  if (wasUnknown && draft.availableBalance != null) {
+    VaultModel.setBaselineFromBank(vault, account.id, draft.availableBalance, 'sms');
+    baselineSet = true;
+  }
   const notif = vault.notifications[before] || null;
-  return { txn: txn, prevBalance: prevBalance, newBalance: account.balance, notifId: notif ? notif.id : null, confirmed: !wasConfirmed };
+  return { txn: txn, prevBalance: prevBalance, newBalance: account.balance, notifId: notif ? notif.id : null, baselineSet: baselineSet };
 }
 
 // Reverse a direct update: the approved transaction is deleted (the model
@@ -59,13 +71,25 @@ function undoIntelUpdate(vault, txnId, notifId) {
 }
 
 // The inline result line, plus the bank's available-balance cross-check
-// when the SMS carried one.
-function intelResultText(account, draft, prevBalance, newBalance) {
+// when the SMS carried one. `baselineSet` is true when this SMS supplied
+// the account's first balance (Phase 3.5). When the balance is still
+// unknown after the update, the line says so plainly — never "Rs 0" for a
+// number that was never set.
+function intelResultText(account, draft, prevBalance, newBalance, baselineSet) {
   const sign = draft.direction === 'debit' ? '−' : '+';
-  const line = account.provider + ' ••' + account.last4 + ' updated: ' + sign
-    + fmtRs(draft.amount) + ' → new balance ' + fmtRs(newBalance);
+  let line;
+  if (newBalance === null || newBalance === undefined) {
+    line = account.provider + ' ••' + account.last4 + ' updated: ' + sign
+      + fmtRs(draft.amount) + ' → balance still not set — this SMS had no available balance. Paste another SMS or upload a statement.';
+  } else if (baselineSet) {
+    line = account.provider + ' ••' + account.last4 + ' updated: ' + sign
+      + fmtRs(draft.amount) + ' → new balance ' + fmtRs(newBalance) + ' · balance set from this SMS';
+  } else {
+    line = account.provider + ' ••' + account.last4 + ' updated: ' + sign
+      + fmtRs(draft.amount) + ' → new balance ' + fmtRs(newBalance);
+  }
   let cross = null;
-  if (draft.availableBalance != null) {
+  if (draft.availableBalance != null && newBalance != null) {
     if (draft.availableBalance === newBalance) {
       cross = 'Bank says available balance ' + fmtRs(draft.availableBalance) + ' — matches the vault.';
     } else {
@@ -75,7 +99,7 @@ function intelResultText(account, draft, prevBalance, newBalance) {
         + ' than the vault shows (other transactions may not be in the vault yet).';
     }
   }
-  return { line: line, cross: cross };
+  return { line: line, cross: cross, baselineSet: !!baselineSet };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
