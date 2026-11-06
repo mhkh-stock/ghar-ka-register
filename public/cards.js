@@ -41,18 +41,22 @@ function esc(s) {
 }
 function fmtRs(n) { return 'Rs ' + Number(n || 0).toLocaleString('en-PK'); }
 
-// Status ladder (Phase 3.3, strongest first): a real bank SMS (Phase 3.1)
-// outranks everything; then an app-checked statement match; then a
-// screenshot the user checked by eye; then an attached statement the app
-// could not read; then a statement that does not mention this card; then
-// nothing at all. One badge, one label — the wording says "matches", never
-// "verified": a statement cannot prove a card is real.
+// Status ladder (Phase 3.6, strongest first): a total-amount screenshot
+// read by on-device OCR verifies the card; then an app-checked statement
+// match; then a screenshot the user checked by eye; then an attached
+// statement the app could not read; then a statement that does not
+// mention this card; then nothing at all. One badge, one label. An SMS
+// never appears on this ladder — it verifies nothing (Hashir's rule,
+// 2026-11-06). A forged screenshot or statement can still lie — only a
+// bank SMS arriving from the bank is hard to fake — so the wording says
+// "Screenshot verified" for the OCR read, never "bank-proven".
 function confirmationBadge(account) {
-  if (account && account.confirmedBy && account.confirmedBy.source === 'bank-sms') {
-    return '<span class="pill green">✓ Bank-confirmed</span>';
+  if (account && account.confirmedBy && account.confirmedBy.source === 'total-amount-screenshot') {
+    return '<span class="pill green">✓ Screenshot verified</span>';
   }
   const p = account && account.proof;
   if (p) {
+    if (p.status === 'screenshot-verified') return '<span class="pill green">✓ Screenshot verified</span>';
     if (p.status === 'match') return '<span class="pill green">Statement matches</span>';
     if (p.status === 'self-checked') return '<span class="pill">Statement attached — self-checked</span>';
     if (p.status === 'mismatch') return '<span class="pill amber">Statement attached — doesn\'t match this card</span>';

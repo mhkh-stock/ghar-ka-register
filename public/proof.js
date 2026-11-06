@@ -1,12 +1,14 @@
 // Personal Card Vault — statement proof (browser + Node tests).
 // Proof-keeping, NOT proof: a statement upload is the user's own record.
 // A forged statement PDF is as easy to make as a fake card number, so a
-// statement can never prove a card is real — only a real bank SMS does
-// (Phase 3.1). What the app CAN do: check the document's readable text
-// against the provider name, the last-4 and the profile display name the
-// user typed, and keep the file encrypted in the vault.
-// Images (screenshots/photos) carry no readable text for this zero-dep app
-// (no OCR): the user checks those by eye instead — "self-checked".
+// statement can never prove a card is real — and a forged screenshot can
+// lie the same way. Only a bank SMS arriving from the bank is hard to
+// fake — but an SMS never VERIFIES a card (Hashir's rule, 2026-11-06):
+// verification comes only from a total-amount screenshot (read on-device
+// by OCR, Phase 3.6) or a statement PDF whose text matches the provider,
+// last-4 and profile name. Images other than a total-amount screenshot
+// carry no readable text for the statement check: the user checks those
+// by eye instead — "self-checked".
 // Pure functions. No DOM, no storage, no crypto.
 'use strict';
 
@@ -220,7 +222,7 @@ function extractStatementBalance(text) {
 function isValidProofRecord(proof) {
   if (!proof || typeof proof !== 'object') return false;
   if (proof.kind !== 'pdf' && proof.kind !== 'image') return false;
-  if (!['match', 'self-checked', 'attached', 'mismatch'].includes(proof.status)) return false;
+  if (!['match', 'screenshot-verified', 'self-checked', 'attached', 'mismatch'].includes(proof.status)) return false;
   if (typeof proof.dataUrl !== 'string' || proof.dataUrl.indexOf('data:') !== 0) return false;
   if (typeof proof.name !== 'string' || !proof.name) return false;
   return true;

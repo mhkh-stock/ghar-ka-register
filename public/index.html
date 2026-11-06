@@ -182,13 +182,17 @@
               <p class="muted">Check it against what you typed — provider, last 4 digits, and your profile name:</p>
               <div id="add-proof-typed" class="muted"></div>
               <button id="add-proof-selfcheck-btn" class="secondary" type="button">I checked — this matches</button>
-              <p class="muted">The app can't read text from a screenshot — you checked this yourself.</p>
+              <p class="muted">This photo is kept as your own record — the app doesn't read it. Check it yourself.</p>
             </div>
             <div id="add-proof-error" class="error"></div>
+            <label for="add-shot">Verify — upload a screenshot showing the total amount in the account (optional)</label>
+            <input id="add-shot" type="file" accept="image/*">
+            <div id="add-shot-status" class="muted"></div>
+            <div id="add-shot-error" class="error"></div>
             <button id="add-account-btn">Add account</button>
             <div id="add-account-error" class="error"></div>
             <div id="add-account-ok" class="ok"></div>
-            <p class="muted" id="add-honest-note">You never type a balance. It is set only by your bank — paste a bank SMS or upload a statement. We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan. A bank SMS can set the balance, but it never verifies the card — only a matching statement PDF does that (a total-amount screenshot will too, when that check is built). A statement is your own record of proof. It is checked only against the bank name, last 4 digits and your profile name — it cannot prove a card is real. Only a matching statement does that. A screenshot's text can't be read by the app — for screenshots, you check the match yourself.</p>
+            <p class="muted" id="add-honest-note">You never type a balance. It is set only by your bank — paste a bank SMS or upload a statement. A screenshot showing the total amount works too, and it is read on this device — the image never leaves your phone or PC. We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan. A bank SMS can set the balance, but it never verifies the card — only a total-amount screenshot or a matching statement PDF does that. A statement is your own record of proof. It is checked only against the bank name, last 4 digits and your profile name — a forged statement or screenshot can still lie. Only a bank SMS arriving from the bank is hard to fake.</p>
           </div>
 
           <div class="card" id="connect-card">
@@ -215,6 +219,10 @@
             <label for="sms-text">Paste your bank SMS here</label>
             <textarea id="sms-text" rows="3" placeholder="Paste the SMS here…"></textarea>
             <button id="sms-parse-btn">Update</button>
+            <span class="muted">or</span>
+            <button id="sms-shot-btn" type="button" class="secondary">Upload SMS screenshot</button>
+            <input id="sms-shot" type="file" accept="image/*" class="file-input-hidden">
+            <div id="sms-shot-status" class="muted"></div>
             <div id="sms-error" class="error"></div>
             <div id="intel-result" class="intel-result hidden"></div>
             <div id="sms-review"></div>
@@ -450,6 +458,7 @@
 <script src="/cards.js"></script>
 <script src="/intel.js"></script>
 <script src="/proof.js"></script>
+<script src="/ocr.js"></script>
 <script src="/totp.js"></script>
 <script src="/nav.js"></script>
 <script src="/app.js"></script>
