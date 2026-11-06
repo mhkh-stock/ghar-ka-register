@@ -256,30 +256,89 @@ function advanceMonthRecovery(adv) {
   return remaining;
 }
 
-// Month-end pay, worked out line by line. Rounding: every deduction is
-// rounded to the nearest whole rupee (halves round up, Math.round) —
-// absent deduction = absentDays x (salary / 30), half-day deduction =
-// halfDays x (salary / 60). The paid-leave allowance is recorded on the
-// helper but does not change the working: every absent day is deducted,
-// exactly as the acceptance example shows (3 absent days on Rs 15,000
-// deduct Rs 1,500). Returns exactly the working fields; nothing is stored.
+// Month-end pay, worked out line by line. Rounding: every figure is
+// rounded to the nearest whole rupee (halves round up, Math.round).
+// Paid leave: the first N absent days each month are free, N = the
+// helper's paid-leave allowance (default 2). A full absent day uses 1
+// free day; a half day uses 0.5. Absent days use the free days first,
+// then half days. Only what is left after the free days deducts: a
+// charged absent day costs salary ÷ 30, a charged half day costs
+// salary ÷ 60. Mid-month joiners are paid only from the join date:
+// salary = (salary ÷ 30) x days from the joined date to the end of the
+// month, counting the join day, never more than the full salary.
+// Absence deductions then apply on top of that prorated salary.
+// Returns exactly the working fields; nothing is stored.
 function payWorkingForHelper(helper, monthKey) {
-  const salary = Number(helper.salaryPkr || 0);
+  const fullSalary = Number(helper.salaryPkr || 0);
   const counts = attendanceCounts(helper, monthKey);
-  const absentDeduction = roundRs(counts.absentDays * salary / 30);
-  const halfDeduction = roundRs(counts.halfDays * salary / 60);
+  const dim = daysInMonth(monthKey);
+  // Proration: days counted in this month (30 = the full salary).
+  const joinMonth = typeof helper.joinedDate === 'string' ? helper.joinedDate.slice(0, 7) : '';
+  const joinDayRaw = typeof helper.joinedDate === 'string' ? Number(helper.joinedDate.slice(8, 10)) : NaN;
+  const joinDay = Number.isFinite(joinDayRaw) ? joinDayRaw : 1;
+  let proratedDays;
+  if (joinMonth < monthKey) proratedDays = 30;
+  else if (joinMonth === monthKey) proratedDays = Math.min(30, dim - joinDay + 1);
+  else proratedDays = 0;
+  const salaryPkr = roundRs(fullSalary * proratedDays / 30);
+  // Paid leave: absent days use the free days first, then half days.
+  const leaveAllowed = Number(helper.leavePerMonth) || 0;
+  const absentFree = Math.min(counts.absentDays, leaveAllowed);
+  const poolAfterAbsent = leaveAllowed - absentFree;
+  const halfFree = Math.min(counts.halfDays * 0.5, poolAfterAbsent);
+  const chargedAbsentDays = counts.absentDays - absentFree;
+  const chargedHalfDays = counts.halfDays - halfFree * 2;
+  const freeDaysUsed = absentFree + halfFree;
+  const absentDeduction = roundRs(chargedAbsentDays * fullSalary / 30);
+  const halfDeduction = roundRs(chargedHalfDays * fullSalary / 60);
   const advanceRecovery = (helper.advances || []).reduce((s, a) => s + advanceMonthRecovery(a), 0);
   return {
-    salaryPkr: salary,
+    fullSalaryPkr: fullSalary,
+    salaryPkr,
+    proratedDays,
+    isProrated: proratedDays < 30,
     absentDays: counts.absentDays,
     halfDays: counts.halfDays,
+    leaveAllowed,
+    freeDaysUsed,
+    freeDaysLeft: leaveAllowed - freeDaysUsed,
+    chargedAbsentDays,
+    chargedHalfDays,
     absentDeduction,
     halfDeduction,
     advanceRecovery,
-    netPkr: roundRs(salary - absentDeduction - halfDeduction - advanceRecovery),
-    daysInMonth: daysInMonth(monthKey),
+    netPkr: roundRs(salaryPkr - absentDeduction - halfDeduction - advanceRecovery),
+    daysInMonth: dim,
   };
 }
+// A working stored before the paid-leave / proration rules (yesterday's
+// shape) has none of the new fields. Read it as the old rules said:
+// no free days, no proration, every absent day charged. New workings
+// already carry every field, so this changes nothing for them.
+function normalizeWorking(w) {
+  const base = w && typeof w === 'object' ? w : {};
+  const absentDays = Number(base.absentDays) || 0;
+  const halfDays = Number(base.halfDays) || 0;
+  return {
+    fullSalaryPkr: Number(base.fullSalaryPkr || base.salaryPkr) || 0,
+    salaryPkr: Number(base.salaryPkr) || 0,
+    proratedDays: Number(base.proratedDays) || 30,
+    isProrated: !!base.isProrated,
+    absentDays,
+    halfDays,
+    leaveAllowed: Number(base.leaveAllowed) || 0,
+    freeDaysUsed: Number(base.freeDaysUsed) || 0,
+    freeDaysLeft: Number(base.freeDaysLeft) || 0,
+    chargedAbsentDays: base.chargedAbsentDays === undefined ? absentDays : Number(base.chargedAbsentDays) || 0,
+    chargedHalfDays: base.chargedHalfDays === undefined ? halfDays : Number(base.chargedHalfDays) || 0,
+    absentDeduction: Number(base.absentDeduction) || 0,
+    halfDeduction: Number(base.halfDeduction) || 0,
+    advanceRecovery: Number(base.advanceRecovery) || 0,
+    netPkr: Number(base.netPkr) || 0,
+    daysInMonth: Number(base.daysInMonth) || 30,
+  };
+}
+function fmtDays(n) { return String(Math.round(Number(n || 0) * 2) / 2); }
 function computeMonthPay(vault, staffId, monthKey) {
   const helper = findStaff(vault, staffId);
   if (!helper) throw fail('NOT_FOUND', 'Helper does not exist.');
@@ -318,21 +377,30 @@ function staffPayStatement(helper, monthKey) {
   if (!helper || typeof helper !== 'object') throw fail('NOT_FOUND', 'Helper does not exist.');
   if (!isMonthKey(monthKey)) throw fail('VALIDATION', 'Month must be YYYY-MM.');
   const paid = findPaidStaffMonth(helper, monthKey);
-  const w = paid ? paid.working : payWorkingForHelper(helper, monthKey);
+  const w = normalizeWorking(paid ? paid.working : payWorkingForHelper(helper, monthKey));
   const absentRate = roundRs(Number(helper.salaryPkr || 0) / 30);
   const halfRate = roundRs(Number(helper.salaryPkr || 0) / 60);
   const lines = [
     'Ghar ka Register — pay statement (as you entered it)',
     'Helper: ' + helper.name + ' (' + helper.role + ')',
     'Month: ' + monthKey,
-    'Monthly salary: ' + fmtRs(w.salaryPkr),
-    'Absent days: ' + w.absentDays + ' x ' + fmtRs(absentRate) + ' = ' + fmtRs(w.absentDeduction),
-    'Half days: ' + w.halfDays + ' x ' + fmtRs(halfRate) + ' = ' + fmtRs(w.halfDeduction),
+  ];
+  if (w.isProrated) {
+    lines.push('Salary (joined ' + helper.joinedDate + ', ' + w.proratedDays + ' days): ' + fmtRs(w.salaryPkr));
+  } else {
+    lines.push('Monthly salary: ' + fmtRs(w.salaryPkr));
+  }
+  if (w.freeDaysUsed > 0) {
+    lines.push('Paid leave used: ' + fmtDays(w.freeDaysUsed) + (w.freeDaysUsed === 1 ? ' day' : ' days') + ' — Rs 0');
+  }
+  lines.push(
+    'Absent days: ' + w.chargedAbsentDays + ' x ' + fmtRs(absentRate) + ' = ' + fmtRs(w.absentDeduction),
+    'Half days: ' + w.chargedHalfDays + ' x ' + fmtRs(halfRate) + ' = ' + fmtRs(w.halfDeduction),
     'Advance recovery: ' + fmtRs(w.advanceRecovery),
     'Net payable: ' + fmtRs(w.salaryPkr) + ' - ' + fmtRs(w.absentDeduction)
       + ' - ' + fmtRs(w.halfDeduction) + ' - ' + fmtRs(w.advanceRecovery)
       + ' = ' + fmtRs(w.netPkr),
-  ];
+  );
   if (paid) lines.push('Paid on ' + paid.paidDate + ' — this month is locked.');
   else lines.push('Not yet marked paid — as you entered it.');
   return lines.join('\n');
@@ -1353,6 +1421,7 @@ if (typeof module !== 'undefined' && module.exports) {
     validateStaff, addStaff, findStaff,
     markAttendance, attendanceCounts, addAdvance, advanceRemaining,
     staffRemainingAdvance, advanceMonthRecovery, payWorkingForHelper,
+    normalizeWorking, fmtDays,
     computeMonthPay, markMonthPaid, staffPayStatement,
     findPaidStaffMonth, isStaffMonthPaid,
     validateDelivery, addDelivery, findDelivery,
@@ -1383,6 +1452,7 @@ if (typeof window !== 'undefined') {
     validateStaff, addStaff, findStaff,
     markAttendance, attendanceCounts, addAdvance, advanceRemaining,
     staffRemainingAdvance, advanceMonthRecovery, payWorkingForHelper,
+    normalizeWorking, fmtDays,
     computeMonthPay, markMonthPaid, staffPayStatement,
     findPaidStaffMonth, isStaffMonthPaid,
     validateDelivery, addDelivery, findDelivery,

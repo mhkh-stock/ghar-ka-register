@@ -239,7 +239,7 @@
       }
       var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(s.name) + ' — ' + esc(s.role)
         + '<span class="sub">' + esc(GharModel.fmtRs(s.salaryPkr)) + ' monthly salary · joined ' + esc(s.joinedDate)
-        + ' · paid leave ' + esc(String(s.leavePerMonth)) + ' days/month'
+        + ' · paid leave ' + esc(String(s.leavePerMonth)) + ' free days/month'
         + (s.phone ? ' · ' + esc(s.phone) : '') + ' · as you entered it</span></div></div>';
       // Attendance: one tap per day cycles present -> absent -> half ->
       // present. Present is the default, so only exceptions are stored.
@@ -279,15 +279,33 @@
       // Month-end pay: the full working, line by line.
       html += '<h3>Pay — ' + esc(month) + '</h3>';
       if (working) {
+        working = GharModel.normalizeWorking(working);
         var absentRate = Math.round(Number(s.salaryPkr || 0) / 30);
         var halfRate = Math.round(Number(s.salaryPkr || 0) / 60);
-        html += '<div class="sum-row"><div class="nm">Monthly salary<span class="sub">as you entered it</span></div>'
-          + '<span class="amt">' + esc(GharModel.fmtRs(working.salaryPkr)) + '</span></div>'
-          + '<div class="sum-row"><div class="nm">Absent: ' + working.absentDays + ' × ' + esc(GharModel.fmtRs(absentRate))
-          + '<span class="sub">' + working.absentDays + ' days × (salary ÷ 30)</span></div>'
+        var absentFree = working.absentDays - working.chargedAbsentDays;
+        var halfFree = working.halfDays - working.chargedHalfDays;
+        html += '<div class="sum-row"><div class="nm">'
+          + (working.isProrated
+            ? 'Salary — joined ' + esc(s.joinedDate) + ' (' + working.proratedDays + ' days)'
+              + '<span class="sub">prorated from the join date: ' + working.proratedDays + ' × (salary ÷ 30)</span>'
+            : 'Monthly salary<span class="sub">as you entered it</span>')
+          + '</div>'
+          + '<span class="amt">' + esc(GharModel.fmtRs(working.salaryPkr)) + '</span></div>';
+        if (working.freeDaysUsed > 0) {
+          html += '<div class="sum-row"><div class="nm">Paid leave used: ' + esc(GharModel.fmtDays(working.freeDaysUsed))
+            + (working.freeDaysUsed === 1 ? ' day' : ' days')
+            + '<span class="sub">first ' + working.leaveAllowed + ' absent days each month are free</span></div>'
+            + '<span class="amt">Rs 0</span></div>';
+        }
+        html += '<div class="sum-row"><div class="nm">Absent: ' + working.chargedAbsentDays + ' × ' + esc(GharModel.fmtRs(absentRate))
+          + '<span class="sub">' + (absentFree > 0
+            ? working.absentDays + ' absent days · ' + absentFree + ' free · ' + working.chargedAbsentDays + ' charged'
+            : working.absentDays + ' days × (salary ÷ 30)') + '</span></div>'
           + '<span class="amt">− ' + esc(GharModel.fmtRs(working.absentDeduction)) + '</span></div>'
-          + '<div class="sum-row"><div class="nm">Half days: ' + working.halfDays + ' × ' + esc(GharModel.fmtRs(halfRate))
-          + '<span class="sub">' + working.halfDays + ' days × (salary ÷ 60)</span></div>'
+          + '<div class="sum-row"><div class="nm">Half days: ' + working.chargedHalfDays + ' × ' + esc(GharModel.fmtRs(halfRate))
+          + '<span class="sub">' + (halfFree > 0
+            ? working.halfDays + ' half days · ' + halfFree + ' free · ' + working.chargedHalfDays + ' charged'
+            : working.halfDays + ' days × (salary ÷ 60)') + '</span></div>'
           + '<span class="amt">− ' + esc(GharModel.fmtRs(working.halfDeduction)) + '</span></div>'
           + '<div class="sum-row"><div class="nm">Advance recovery<span class="sub">from the advances above, as you entered them</span></div>'
           + '<span class="amt">− ' + esc(GharModel.fmtRs(working.advanceRecovery)) + '</span></div>'
