@@ -144,8 +144,9 @@ function migrateVault(vault) {
   if (vault.settings.autoLockMinutes === undefined) vault.settings.autoLockMinutes = 5;
   if (vault.settings.lowBalanceThreshold === undefined) vault.settings.lowBalanceThreshold = 5000;
   if (!Array.isArray(vault.accounts)) vault.accounts = [];
-  // Bank-confirmed (Phase 3.1): old accounts have no confirmedBy — they
-  // were never proven by a bank SMS, so they load as "Not confirmed".
+  // Verified (Phase 3.6): old accounts have no confirmedBy — they were
+  // never verified by a screenshot or a statement, so they load as
+  // "Not confirmed".
   vault.accounts.forEach(function (a) { if (a && a.confirmedBy === undefined) a.confirmedBy = null; });
   // No typed balances (Phase 3.5): an old account without a balance field
   // loads as unknown (null). Existing numeric balances stay exactly as
@@ -157,6 +158,15 @@ function migrateVault(vault) {
   });
   // Statement proof (Phase 3.3): old accounts have no proof field.
   vault.accounts.forEach(function (a) { if (a && a.proof === undefined) a.proof = null; });
+  // STRIP old badges (Hashir, 2026-11-06): a "Bank-confirmed" earned by
+  // an SMS under the old Phase 3.1 rule is no longer valid — an SMS never
+  // verifies a card. The badge is cleared to null; the card must be
+  // re-verified by a total-amount screenshot or a statement PDF. The
+  // balance is NOT touched — only the verification badge is stripped.
+  // Accounts verified by a statement keep their badge untouched.
+  vault.accounts.forEach(function (a) {
+    if (a && a.confirmedBy && a.confirmedBy.source === 'bank-sms') a.confirmedBy = null;
+  });
   // Monthly check (Phase 4): old vaults were never reconciled.
   if (vault.lastReconcileAt === undefined) vault.lastReconcileAt = null;
   if (vault.lastReconcileSkipped === undefined) vault.lastReconcileSkipped = 0;
@@ -279,17 +289,19 @@ function isBalanceKnown(account) {
 }
 
 // Set an account's balance from a BANK source only (Phase 3.5): a bank SMS
-// (Intelligence) or a statement. `source` must be 'sms' or 'statement' —
-// anything else is rejected. The bank's number is the CURRENT balance, so
-// startingBalance is back-computed from it: startingBalance = balance −
-// (net effect of the already-approved transactions), which keeps
-// reconcile() true. The bank's number is trusted as stated — even a
-// negative one (an overdrawn account) — because it came from the bank.
+// (Intelligence), a statement, or a total-amount screenshot read by
+// on-device OCR (Phase 3.6). `source` must be 'sms', 'statement' or
+// 'screenshot' — anything else is rejected. The bank's number is the
+// CURRENT balance, so startingBalance is back-computed from it:
+// startingBalance = balance − (net effect of the already-approved
+// transactions), which keeps reconcile() true. The bank's number is
+// trusted as stated — even a negative one (an overdrawn account) —
+// because it came from the bank.
 function setBaselineFromBank(vault, accountId, balance, source) {
   const account = findAccount(vault, accountId);
   if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
-  if (source !== 'sms' && source !== 'statement') {
-    throw fail('VALIDATION', 'A baseline can only come from a bank SMS or a statement.');
+  if (source !== 'sms' && source !== 'statement' && source !== 'screenshot') {
+    throw fail('VALIDATION', 'A baseline can only come from a bank SMS, a statement, or a total-amount screenshot.');
   }
   const b = Number(balance);
   if (!Number.isFinite(b)) throw fail('VALIDATION', 'Baseline balance must be a number.');
@@ -353,19 +365,30 @@ function deleteAccount(vault, accountId) {
 
 // Remove the statement proof from a card (Phase 3.3). The card itself is
 // untouched — only its proof record is cleared, so its status falls back
-// to "Not confirmed yet" (unless a real bank SMS confirmed it).
+// to "Not confirmed yet" — unless the card was verified by a total-amount
+// screenshot: that verification IS the screenshot proof, so removing the
+// proof removes the verification too (confirmedBy is cleared as well).
+// A statement-matched card keeps its own rule: removing its statement
+// proof also drops it back to unconfirmed (the proof was the match).
 function removeProof(vault, accountId) {
   const account = findAccount(vault, accountId);
   if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
   account.proof = null;
+  if (account.confirmedBy && account.confirmedBy.source === 'total-amount-screenshot') {
+    account.confirmedBy = null;
+  }
   return account;
 }
 
 // A proof record is only what the UI built from a validated upload.
+// Statuses: 'match' (statement PDF matched), 'screenshot-verified'
+// (total-amount screenshot read by on-device OCR, Phase 3.6),
+// 'self-checked' (user checked a screenshot by eye), 'attached' (kept as
+// a record), 'mismatch' (readable PDF that does not mention this card).
 function validProofRecord(proof) {
   if (!proof || typeof proof !== 'object') return false;
   if (proof.kind !== 'pdf' && proof.kind !== 'image') return false;
-  if (!['match', 'self-checked', 'attached', 'mismatch'].includes(proof.status)) return false;
+  if (!['match', 'screenshot-verified', 'self-checked', 'attached', 'mismatch'].includes(proof.status)) return false;
   if (typeof proof.dataUrl !== 'string' || proof.dataUrl.indexOf('data:') !== 0) return false;
   if (typeof proof.name !== 'string' || !proof.name) return false;
   return true;
@@ -381,12 +404,12 @@ function attachProof(vault, accountId, proof) {
 }
 
 // ---- Monthly check (Phase 4) ----
-// An account is "ready" for the monthly check when it was bank-confirmed
-// (an old record, or the future screenshot verification) or a statement
-// matched it — AND its balance is known. A verified card whose balance was
-// never set is not ready: the check cannot verify a number that does not
-// exist yet. An SMS alone never makes an account ready: it confirms
-// nothing (Hashir's rule, 2026-11-06).
+// An account is "ready" for the monthly check when it was verified (a
+// total-amount screenshot or a statement matched it) AND its balance is
+// known. A verified card whose balance was never set is not ready: the
+// check cannot verify a number that does not exist yet. An SMS alone
+// never makes an account ready: it confirms nothing (Hashir's rule,
+// 2026-11-06).
 function accountCheckReady(account) {
   return isBalanceKnown(account)
     && (isBankConfirmed(account) || !!(account && account.proof && account.proof.status === 'match'));
@@ -430,27 +453,23 @@ function markMonthlyCheckDone(vault, skippedCount) {
   return vault.lastReconcileAt;
 }
 
-// Bank-confirmed status. RULE CHANGE (Hashir, 2026-11-06): the
-// "Bank-confirmed" badge is earned ONLY by a total-amount screenshot or a
-// bank statement PDF — NEVER by an SMS. An SMS can set the balance (it is
-// bank data), but it never verifies the card. So NO code path calls
-// markAccountBankConfirmed today: the SMS paths (direct match in
-// Intelligence, review approval, CSV, manual add) never confirm. The
-// function below is RESERVED for the total-amount screenshot verification
-// (next phase, needs on-device OCR) — that phase will call it with its own
-// source. Do not call it from any SMS path. confirmedBy records with
-// source 'bank-sms' are Phase 3.1 history (before the rule change); they
-// still render the badge, and isBankConfirmed still reads them, so old
-// vaults keep their history.
+// Verified status. RULE (Hashir, 2026-11-06): a card is VERIFIED only by
+// a total-amount screenshot or a bank statement PDF — NEVER by an SMS. An
+// SMS can set the balance (it is bank data), but it never verifies the
+// card. markAccountBankConfirmed is called ONLY by the total-amount
+// screenshot path (Add page, Phase 3.6, on-device OCR) and stamps source
+// 'total-amount-screenshot'. Old 'bank-sms' records (Phase 3.1, before
+// the rule change) are STRIPPED by migrateVault() — they load as
+// unconfirmed and must be re-verified.
 function isBankConfirmed(account) {
-  return !!(account && account.confirmedBy && account.confirmedBy.source === 'bank-sms'
+  return !!(account && account.confirmedBy && account.confirmedBy.source === 'total-amount-screenshot'
     && typeof account.confirmedBy.at === 'string');
 }
 function markAccountBankConfirmed(vault, accountId) {
   const account = findAccount(vault, accountId);
   if (!account) throw fail('NOT_FOUND', 'Account does not exist.');
   if (!isBankConfirmed(account)) {
-    account.confirmedBy = { source: 'bank-sms', at: new Date().toISOString() };
+    account.confirmedBy = { source: 'total-amount-screenshot', at: new Date().toISOString() };
   }
   return account.confirmedBy;
 }
