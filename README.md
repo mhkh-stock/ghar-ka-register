@@ -88,6 +88,12 @@ code.
   pages to the rupee. Photos are never in a CSV. A CSV is plain text:
   anyone who opens the file can read it. The encrypted backup is
   separate (Backup & Import).
+- **Profile** — household name, month start day (1–28), and optional
+  phone, email and a profile picture (JPEG/PNG, magic-byte checked,
+  downscaled to ≤ 500 KB, stored encrypted inside the vault). All three
+  are optional — the book works the same with them empty. They stay on
+  this device only and are never sent anywhere. The picture also shows
+  as a small round photo at the top of the sidebar.
 
 ## Security — how it works
 
@@ -100,6 +106,9 @@ code.
   copies the files.
 - **Auto-lock** after 5 minutes without use; 5 wrong PINs → growing
   lockout delay (30s, doubling, cap 15 min).
+- **Change PIN / passphrase:** on the Security page you type your
+  current PIN (and passphrase, if you set one) once at the top; both
+  changes use those — the same credentials are never asked twice.
 - **No recovery, by design:** forgotten PIN = data unrecoverable.
   There is no "forgot PIN" — that is the point of "on this device
   only". Export an encrypted backup and keep it somewhere safe.

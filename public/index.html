@@ -55,7 +55,8 @@
     <div class="app-shell">
       <aside id="sidebar" class="glass" aria-label="Book navigation">
         <div class="sidebar-profile">
-          <span class="dp-initials">V</span>
+          <img id="sidebar-photo" class="dp-img hidden" alt="Profile photo">
+          <span id="sidebar-initials" class="dp-initials">V</span>
           <div class="sidebar-name-wrap">
             <span id="sidebar-name" class="sidebar-name">My Home</span>
             <span class="muted small">Ghar ka Register</span>
@@ -74,7 +75,7 @@
           <button class="nav-btn" id="nav-backup" data-page="backup">💾 <span class="nav-label">Backup &amp; Import</span></button>
           <button class="nav-btn" id="nav-profile" data-page="profile">👤 <span class="nav-label">Profile</span></button>
         </nav>
-        <button id="lock-btn" class="nav-btn secondary">🔒 <span class="nav-label">Lock book</span></button>
+        <button id="lock-btn" class="nav-btn secondary">🚪 <span class="nav-label">Lock book</span></button>
       </aside>
 
       <div class="app-content">
@@ -91,7 +92,7 @@
             <p id="today-empty" class="muted">Nothing due — add your first helper, bill or document.</p>
           </div>
           <div class="card">
-            <h2>Honest limits</h2>
+            <h3>Honest limits</h3>
             <p class="muted">Nothing is fetched, checked or looked up — every record is as you entered it. A wrong date is a wrong date; the book shows it, it does not bless it. There are no reminders when the app is closed — open the app and Today tells you what is due. If the PIN is forgotten, the book cannot be opened (by design). Export an encrypted backup from Backup &amp; Import, and keep it somewhere safe.</p>
           </div>
         </section>
@@ -128,7 +129,7 @@
             <div id="staff-add-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>Helpers</h2>
+            <h3>Helpers</h3>
             <label for="staff-month">Month (attendance &amp; pay)</label>
             <input id="staff-month" type="month">
             <div id="staff-list"></div>
@@ -136,7 +137,7 @@
             <div id="staff-statement" class="review hidden"></div>
           </div>
           <div class="card">
-            <h2>Record an advance</h2>
+            <h3>Record an advance</h3>
             <p class="muted">Pick a helper, enter the advance, and choose how it comes back: all from the next pay, or a fixed amount each month until it is cleared. The remaining advance is always shown on the helper.</p>
             <label for="adv-helper">Helper</label>
             <select id="adv-helper"></select>
@@ -193,14 +194,14 @@
             <div id="del-add-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>Deliveries</h2>
+            <h3>Deliveries</h3>
             <label for="del-month">Month (daily log &amp; bill)</label>
             <input id="del-month" type="month">
             <div id="deliveries-list"></div>
             <p id="deliveries-empty" class="muted">No deliveries yet.</p>
           </div>
           <div class="card">
-            <h2>Log a day</h2>
+            <h3>Log a day</h3>
             <p class="muted">Quantity delivered that day. Leave the usual quantity as it is, or enter 0 for a skipped day, or a bigger number for extra quantity.</p>
             <label for="log-delivery">Delivery</label>
             <select id="log-delivery"></select>
@@ -213,7 +214,7 @@
             <div id="log-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>Gas refill</h2>
+            <h3>Gas refill</h3>
             <p class="muted">For a gas cylinder delivery: the refill date and the price you paid, as you entered it. The days since the last refill are shown on the delivery.</p>
             <label for="refill-delivery">Delivery</label>
             <select id="refill-delivery"></select>
@@ -262,13 +263,13 @@
             <div id="udh-entry-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>People &amp; entries</h2>
+            <h3>People &amp; entries</h3>
             <div id="udhaar-list"></div>
             <p id="udhaar-empty" class="muted">No udhaar entries yet.</p>
             <div id="udh-reminder" class="review hidden"></div>
           </div>
           <div class="card">
-            <h2>Record a repayment</h2>
+            <h3>Record a repayment</h3>
             <p class="muted">A repayment lowers the running balance of one entry. Repayments are kept as a list — nothing is edited or deleted after it is recorded. A repayment bigger than what is still outstanding is refused.</p>
             <label for="repay-person">Person</label>
             <select id="repay-person"></select>
@@ -283,7 +284,7 @@
             <div id="repay-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>Forgive an amount</h2>
+            <h3>Forgive an amount</h3>
             <p class="muted">An amount you let go of is recorded as forgiven — never as a payment that never happened. It lowers the balance the same way a repayment does.</p>
             <label for="forgive-person">Person</label>
             <select id="forgive-person"></select>
@@ -330,7 +331,7 @@
             <div id="bill-add-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>Bills</h2>
+            <h3>Bills</h3>
             <div id="bills-list"></div>
             <p id="bills-empty" class="muted">No bills yet.</p>
           </div>
@@ -371,7 +372,7 @@
             <div id="doc-add-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>Documents</h2>
+            <h3>Documents</h3>
             <div id="documents-list"></div>
             <p id="documents-empty" class="muted">No documents yet.</p>
           </div>
@@ -411,7 +412,7 @@
             <div id="med-add-ok" class="ok"></div>
           </div>
           <div class="card">
-            <h2>Medicines</h2>
+            <h3>Medicines</h3>
             <div id="medicine-list"></div>
             <p id="medicine-empty" class="muted">No medicines yet.</p>
           </div>
@@ -423,13 +424,14 @@
           <div class="card">
             <h2>Summary</h2>
             <p class="muted">This month's totals per section, and this month vs last month — every total recomputed from the entries on the section pages, never stored. Udhaar outstanding is a point-in-time figure (all open entries), not a monthly total. Every figure below shows its working.</p>
+            <h3>This month's figures</h3>
             <label for="summary-month">Month</label>
             <input id="summary-month" type="month">
             <div id="summary-list"></div>
             <p id="summary-empty" class="muted">Nothing to summarise yet — add a helper, a delivery, an udhaar entry, a bill, a document or a medicine first.</p>
           </div>
           <div class="card">
-            <h2>Export — CSV</h2>
+            <h3>Export — CSV</h3>
             <p class="muted">One file per section, or all six sections in one file. Money is plain whole rupees, so the file opens as readable CSV in a spreadsheet. Photos are never in a CSV — they stay inside the encrypted book. The totals in the files are the same rows the section pages show; they reconcile to the rupee.</p>
             <div class="row">
               <button type="button" id="csv-staff-btn">Staff CSV</button>
@@ -452,11 +454,14 @@
           <div class="card" id="security-settings-card">
             <h2>Security settings</h2>
             <p class="muted">The book opens with your PIN only. It locks itself after 5 minutes without use. 5 wrong PINs lock it for a growing delay (30s, then doubling, up to 15 minutes).</p>
+            <h3>Your current PIN and passphrase</h3>
+            <p class="muted">Type them once here — both changes below use these.</p>
+            <label for="security-pin">Current PIN</label>
+            <input id="security-pin" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
+            <label for="security-pass">Current passphrase (only if you set one)</label>
+            <input id="security-pass" type="password" autocomplete="current-password" placeholder="leave empty if you didn't set one">
+            <div id="security-error" class="error"></div>
             <h3>Change PIN</h3>
-            <label for="change-pin-old">Current PIN</label>
-            <input id="change-pin-old" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
-            <label for="change-pin-pass">Current passphrase (only if you set one)</label>
-            <input id="change-pin-pass" type="password" autocomplete="current-password" placeholder="leave empty if you didn't set one">
             <label for="change-pin-new">New PIN (6 digits)</label>
             <input id="change-pin-new" type="password" inputmode="numeric" maxlength="6" placeholder="e.g. 482917">
             <label for="change-pin-new2">Confirm new PIN</label>
@@ -465,10 +470,6 @@
             <div id="change-pin-error" class="error"></div>
             <div id="change-pin-ok" class="ok"></div>
             <h3>Change passphrase</h3>
-            <label for="change-pass-old">Current PIN</label>
-            <input id="change-pass-old" type="password" inputmode="numeric" maxlength="6" placeholder="••••••">
-            <label for="change-pass-pass">Current passphrase (only if you set one)</label>
-            <input id="change-pass-pass" type="password" autocomplete="current-password" placeholder="leave empty if you didn't set one">
             <label for="change-pass-new">New passphrase (at least 4 characters, empty = remove it)</label>
             <input id="change-pass-new" type="password" placeholder="leave empty to remove the passphrase">
             <button id="change-pass-btn">Change passphrase</button>
@@ -476,7 +477,7 @@
             <div id="change-pass-ok" class="ok"></div>
           </div>
           <div class="card" id="security-card">
-            <h2>How your book is protected</h2>
+            <h3>How your book is protected</h3>
             <p class="muted">Local-first: everything lives only in this browser, encrypted with PBKDF2 + AES-256-GCM under your PIN. The server stores nothing.</p>
             <p class="muted"><strong>Honest limit:</strong> software encryption is only as secure as this device. On a shared device left unlocked, someone with the app open can see the book in plain text. Keep your device locked and your PIN private.</p>
           </div>
@@ -488,6 +489,7 @@
           <div class="card" id="backup-card">
             <h2>Backup</h2>
             <p class="muted">Export an encrypted backup file — it can only be restored with your PIN (and passphrase, if you set one). Keep the file somewhere safe; the backup never leaves this device unless you move it yourself. An old Card Vault backup does not open here — it restores only into the old code.</p>
+            <h3>Export and import</h3>
             <div class="row">
               <button id="export-btn">Export encrypted backup</button>
               <label for="import-file" style="margin:0">Import a backup
@@ -510,6 +512,20 @@
           <div class="card" id="profile-card">
             <h2>Profile — your household</h2>
             <p class="muted">Your household name and month start day live <strong>inside the book</strong> — encrypted with everything else, only on this device. Nothing is uploaded anywhere. The month start day is recorded for your reference only: staff pay and delivery bills still follow the calendar month (1st to last day).</p>
+            <p class="muted">Phone, email and a profile picture are <strong>optional</strong> — leave any of them empty and the book works the same. They stay on this device only, inside the encrypted book, and are never sent anywhere.</p>
+            <h3>Your details</h3>
+            <div class="profile-photo-wrap">
+              <img id="profile-photo-preview" class="dp-img large hidden" alt="Profile photo">
+              <span id="profile-photo-initials" class="dp-initials large">V</span>
+            </div>
+            <label for="profile-phone">Phone (optional)</label>
+            <input id="profile-phone" type="tel" maxlength="20" placeholder="e.g. 0300 1234567">
+            <label for="profile-email">Email (optional)</label>
+            <input id="profile-email" type="email" maxlength="80" placeholder="e.g. name@example.com">
+            <label for="profile-photo">Profile picture (optional — JPEG or PNG)</label>
+            <input id="profile-photo" type="file" accept="image/jpeg,image/png">
+            <button id="profile-photo-remove-btn" type="button">Remove photo</button>
+            <div id="profile-photo-note" class="muted small"></div>
             <label for="profile-household">Household name</label>
             <input id="profile-household" type="text" maxlength="60" placeholder="e.g. Hashir's home">
             <label for="profile-monthstart">Month start day (1–28)</label>
