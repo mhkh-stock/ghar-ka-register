@@ -11,6 +11,7 @@ const C = require('./public/csv.js');
 const K = require('./public/cards.js');
 const I = require('./public/intel.js');
 const P = require('./public/proof.js');
+const O = require('./public/ocr.js');
 const T = require('./public/totp.js');
 const N = require('./public/nav.js');
 
@@ -370,7 +371,11 @@ async function main() {
   (function walk(dir) {
     for (const f of fs.readdirSync(dir)) {
       const full = path.join(dir, f);
-      if (fs.statSync(full).isDirectory()) { if (f !== 'data') walk(full); }
+      // public/vendor/ is third-party published code (the Tesseract.js
+      // v5.1.1 OCR engine, downloaded once from jsdelivr, never edited) —
+      // its minified digit runs trip the card-number pattern, so the
+      // secrets scan covers the app's own sources only, not the vendor.
+      if (fs.statSync(full).isDirectory()) { if (f !== 'data' && f !== 'vendor') walk(full); }
       else if (/\.(js|html|css|md|json)$/.test(f)) srcFiles.push(full);
     }
   })(__dirname);
@@ -930,13 +935,59 @@ async function main() {
       return v.accounts[0].confirmedBy === null && M.isBankConfirmed(v.accounts[0]) === false
         && v.accounts[0].balance === 100 && v.accounts[1].balance === null && v.accounts[1].startingBalance === null;
     })());
-  check('Verify: NO path grants Bank-confirmed from an SMS — the marker is reserved for screenshot/statement verification',
-    !intelJs.includes('markAccountBankConfirmed') && !appJs.includes('markAccountBankConfirmed')
-    && !appJs.includes('Bank-confirmed — this SMS'));
-  check('Verify: cards show the bank-confirmed badge, unconfirmed cards the muted badge',
-    K.buildCardVisual({ id: 'c1', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: { source: 'bank-sms', at: '2026-11-06T00:00:00.000Z' } }, {}).includes('✓ Bank-confirmed')
+  check('Verify (STRIP, Hashir 2026-11-06): an old SMS-earned badge is stripped on load — balance untouched, card must be re-verified',
+    (() => {
+      const v = M.emptyVault();
+      // A: verified by SMS under the old Phase 3.1 rule — badge stripped.
+      v.accounts.push({ id: 's1', provider: 'UBL', type: 'debit', nickname: 'SMS badge', last4: '1111', balance: 47500, startingBalance: 47500, confirmedBy: { source: 'bank-sms', at: '2026-11-05T00:00:00.000Z' }, createdAt: '2026-11-05T00:00:00.000Z' });
+      // B: verified by statement — badge untouched.
+      v.accounts.push({ id: 's2', provider: 'HBL', type: 'debit', nickname: 'Statement badge', last4: '2222', balance: 900, startingBalance: 900, confirmedBy: null, proof: { kind: 'pdf', name: 's.pdf', mime: 'application/pdf', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', status: 'match', at: '2026-11-05T00:00:00.000Z' }, createdAt: '2026-11-05T00:00:00.000Z' });
+      M.migrateVault(v);
+      const a = v.accounts[0], b = v.accounts[1];
+      return a.confirmedBy === null && M.isBankConfirmed(a) === false
+        && K.confirmationBadge(a).includes('Not confirmed yet')
+        && a.balance === 47500 && a.startingBalance === 47500 // balance NOT touched
+        && b.proof && b.proof.status === 'match'
+        && K.confirmationBadge(b).includes('Statement matches');
+    })());
+  check('Verify: markAccountBankConfirmed stamps a screenshot source (never bank-sms) and isBankConfirmed reads it',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
+      const out = M.markAccountBankConfirmed(v, a.id);
+      return out && out.source === 'total-amount-screenshot' && typeof out.at === 'string'
+        && M.isBankConfirmed(a) === true
+        && K.confirmationBadge(a).includes('✓ Screenshot verified')
+        && M.markAccountBankConfirmed(v, a.id).source === 'total-amount-screenshot';
+    })());
+  check('Verify: setBaselineFromBank accepts a screenshot source and rejects anything else',
+    (() => {
+      const v = M.emptyVault();
+      const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234' });
+      M.setBaselineFromBank(v, a.id, 47500, 'screenshot');
+      const ok = a.balance === 47500 && a.startingBalance === 47500;
+      const bad = throwsCode(function () { M.setBaselineFromBank(v, a.id, 1, 'typed'); }, 'VALIDATION');
+      return ok && bad;
+    })());
+  check('Verify: NO SMS path grants verification — the marker lives only in the screenshot path (Add page)',
+    !intelJs.includes('markAccountBankConfirmed')
+    && !appJs.includes('Bank-confirmed — this SMS')
+    && (appJs.match(/markAccountBankConfirmed/g) || []).length <= 1
+    && (() => {
+      // Any call site must sit outside the Intelligence section (paste /
+      // screenshot SMS updates) — it belongs to the Add page.
+      const intelStart = appJs.indexOf('// ---- Step 3: Intelligence');
+      const csvStart = appJs.indexOf('// ---- Step 3: CSV import');
+      const callAt = appJs.indexOf('markAccountBankConfirmed');
+      if (callAt < 0) return true; // not wired yet — the Add step adds it
+      return intelStart >= 0 && csvStart > intelStart && (callAt < intelStart || callAt > csvStart);
+    })()
+    && !/markAccountBankConfirmed/.test(intelJs));
+  check('Verify: cards show the screenshot-verified badge, unconfirmed cards the muted badge',
+    K.buildCardVisual({ id: 'c1', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: { source: 'total-amount-screenshot', at: '2026-11-06T00:00:00.000Z' } }, {}).includes('✓ Screenshot verified')
     && K.buildCardVisual({ id: 'c2', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: null }, {}).includes('Not confirmed yet')
-    && K.confirmationBadge({ confirmedBy: { source: 'bank-sms', at: 'x' } }).includes('Bank-confirmed')
+    && K.confirmationBadge({ confirmedBy: { source: 'total-amount-screenshot', at: 'x' } }).includes('Screenshot verified')
+    && K.confirmationBadge({ confirmedBy: { source: 'bank-sms', at: 'x' } }).includes('Not confirmed yet')
     && appJs.includes('Cards.confirmationBadge(a)'));
   check('Verify: the Add page carries the honest note (incl. SMS never verifies)',
     html.includes('id="add-honest-note"') && html.includes('We save only what you type — no app can check a card with the bank until open banking goes live in Pakistan.')
@@ -968,15 +1019,15 @@ async function main() {
         && a.startingBalance === null && a.provider === 'UBL' && a.last4 === '1234'
         && v.transactions.length === 0 && M.reconcile(v).ok;
     })());
-  check('Rename: a bank-confirmed card keeps its badge after a rename',
+  check('Rename: a screenshot-verified card keeps its badge after a rename',
     (() => {
       const v = M.emptyVault();
       M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '1234' });
       const a = v.accounts[0];
-      // Hand-set: an old-vault record from before the 2026-11-06 rule
-      // change (an SMS never confirms now — this only tests that a rename
-      // preserves whatever confirmation the card already carries).
-      a.confirmedBy = { source: 'bank-sms', at: '2026-11-06T00:00:00.000Z' };
+      // Hand-set: a card verified by a total-amount screenshot (an SMS
+      // never confirms — this only tests that a rename preserves whatever
+      // verification the card already carries).
+      a.confirmedBy = { source: 'total-amount-screenshot', at: '2026-11-06T00:00:00.000Z' };
       M.renameAccount(v, a.id, 'JC daily');
       return M.isBankConfirmed(a) === true && a.nickname === 'JC daily' && a.balance === null;
     })());
@@ -1117,14 +1168,16 @@ async function main() {
   function proofRecord(status) {
     return { kind: 'pdf', name: 'statement.pdf', mime: 'application/pdf', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', status, at: '2026-11-06T00:00:00.000Z' };
   }
-  check('Proof: the status ladder runs Bank-confirmed > match > self-checked > attached > mismatch > unconfirmed',
-    K.confirmationBadge({ confirmedBy: { source: 'bank-sms', at: 'x' }, proof: proofRecord('match') }).includes('✓ Bank-confirmed')
+  check('Proof: the status ladder runs Screenshot verified > match > self-checked > attached > mismatch > unconfirmed',
+    K.confirmationBadge({ confirmedBy: { source: 'total-amount-screenshot', at: 'x' }, proof: proofRecord('match') }).includes('✓ Screenshot verified')
     && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('match') }).includes('Statement matches')
     && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('self-checked') }).includes('self-checked')
     && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('attached') }).includes('Statement attached</span>')
     && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('mismatch') }).includes("doesn't match this card")
     && K.confirmationBadge({ confirmedBy: null, proof: null }).includes('Not confirmed yet')
-    && !K.confirmationBadge({ confirmedBy: null, proof: proofRecord('match') }).includes('verified'));
+    && K.confirmationBadge({ confirmedBy: null, proof: proofRecord('screenshot-verified') }).includes('✓ Screenshot verified')
+    && !K.confirmationBadge({ confirmedBy: null, proof: proofRecord('match') }).includes('verified')
+    && K.confirmationBadge({ confirmedBy: { source: 'bank-sms', at: 'x' }, proof: null }).includes('Not confirmed yet'));
   check('Proof: a new card with no proof is "Not confirmed yet"; a proof record is stored on the card',
     (() => {
       const v = M.emptyVault();
@@ -1140,18 +1193,19 @@ async function main() {
       const b = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'HBL', last4: '5678', proof: { kind: 'pdf', name: 'x', dataUrl: 'data:application/pdf;base64,JVBERi0xLjQK', status: 'verified' } });
       return a.proof === null && b.proof === null;
     })());
-  check('Proof: removing proof clears the status back to unconfirmed — unless the card is bank-confirmed',
+  check('Proof: removing proof clears the status back to unconfirmed — including a screenshot-verified card (its proof WAS the verification)',
     (() => {
       const v = M.emptyVault();
       const a = M.createAccount(v, { provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', proof: proofRecord('match') });
       M.removeProof(v, a.id);
       const backToUnconfirmed = a.proof === null && K.confirmationBadge(a).includes('Not confirmed yet');
-      const b = M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '9999', proof: proofRecord('match') });
-      // Hand-set: an old-vault bank-confirmed record from before the
-      // 2026-11-06 rule change (an SMS never confirms now).
-      b.confirmedBy = { source: 'bank-sms', at: '2026-11-06T00:00:00.000Z' };
+      const b = M.createAccount(v, { provider: 'JazzCash', type: 'wallet', nickname: 'JC', last4: '9999', proof: proofRecord('screenshot-verified') });
+      // Screenshot-verified: the verification lives in the screenshot
+      // proof, so removing the proof removes the verification too.
+      b.confirmedBy = { source: 'total-amount-screenshot', at: '2026-11-06T00:00:00.000Z' };
       M.removeProof(v, b.id);
-      return backToUnconfirmed && b.proof === null && K.confirmationBadge(b).includes('✓ Bank-confirmed');
+      return backToUnconfirmed && b.proof === null && b.confirmedBy === null
+        && K.confirmationBadge(b).includes('Not confirmed yet');
     })());
   check('Proof: renaming a card keeps its proof (provider/last-4 cannot change, so proof stays attached)',
     (() => {
@@ -1181,16 +1235,18 @@ async function main() {
     && pageHtml('add').includes('id="add-proof-typed"') && pageHtml('add').includes('id="add-proof-selfcheck-btn"')
     && pageHtml('add').includes('id="add-proof-error"')
     && pageHtml('add').includes('I checked — this matches'));
-  check('Proof UI: the Add page note says a statement cannot prove a card, and screenshots are self-checked',
+  check('Proof UI: the Add page note states the new rule — SMS never verifies, screenshot/statement do, forged documents can lie',
     pageHtml('add').includes('id="add-honest-note"')
     && pageHtml('add').includes('A statement is your own record of proof.')
-    && pageHtml('add').includes('it cannot prove a card is real')
-    && pageHtml('add').includes("A screenshot's text can't be read by the app — for screenshots, you check the match yourself."));
+    && pageHtml('add').includes('only a total-amount screenshot or a matching statement PDF does that')
+    && pageHtml('add').includes('a forged statement or screenshot can still lie')
+    && pageHtml('add').includes('the image never leaves your phone or PC')
+    && pageHtml('add').includes('A screenshot showing the total amount works too'));
   check('Proof UI: the card shows View proof + a two-tap Remove proof; the proof rides along on add',
     appJs.includes('proofActionsHtml') && appJs.includes('class="proof-link"')
     && appJs.includes('data-action="remove-proof"') && appJs.includes('data-action="confirm-remove-proof"')
     && appJs.includes('pendingProofRemoveId') && appJs.includes('VaultModel.removeProof')
-    && appJs.includes('proof: state.addProof || null') && appJs.includes('onProofFile')
+    && appJs.includes('proof: state.addScreenshot || state.addProof || null') && appJs.includes('onProofFile')
     && appJs.includes('onProofSelfCheck'));
   check('Proof UI: the self-check only happens on a deliberate tap — images never match automatically',
     P.checkProofMatch('image', 'UBL 1234 Muhammad Hashir', ublCard, 'Muhammad Hashir') === 'image'
@@ -1247,9 +1303,9 @@ async function main() {
       const d = M.createAccount(v, { provider: 'HBL', type: 'debit', nickname: 'D', last4: '4444' });
       const sms = S.parseSms('Rs 100.00 debited from your HBL account ••••1111 on 06-Nov-2026. Available balance Rs 900.00');
       I.applyIntelUpdate(v, sms, a);
-      // Hand-set: an old-vault bank-confirmed record from before the
-      // 2026-11-06 rule change — the record still carries its date.
-      d.confirmedBy = { source: 'bank-sms', at: '2026-11-05T00:00:00.000Z' };
+      // Hand-set: a screenshot-verified record — its date is the
+      // verification date, and an SMS alone sets no date.
+      d.confirmedBy = { source: 'total-amount-screenshot', at: '2026-11-05T00:00:00.000Z' };
       return M.lastConfirmedAt(a) === null && M.lastConfirmedAt(b) === '2026-11-06'
         && M.lastConfirmedAt(c) === null && M.lastConfirmedAt(d) === '2026-11-05';
     })());
@@ -1394,6 +1450,82 @@ async function main() {
     && !K.buildCardVisual({ id: 'c1', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: null, confirmedBy: null }, {}).includes('Rs 0')
     && K.buildCardVisual({ id: 'c2', provider: 'UBL', type: 'debit', nickname: 'UBL', last4: '1234', balance: 0, confirmedBy: null }, {}).includes('Rs 0'));
 
+  // ---- §9i. Phase 3.6: on-device OCR (screenshot verification + SMS screenshot) ----
+  const ocrJs = fs.readFileSync(path.join(__dirname, 'public', 'ocr.js'), 'utf8');
+  const IMG_URL = 'data:image/jpeg;base64,/9j/4AAQSkZJRg==';
+  const PDF_URL = 'data:application/pdf;base64,JVBERi0xLjQK';
+  check('OCR: a screenshot file validates (JPEG/PNG, under 500 KB); a PDF is refused here',
+    O.validateScreenshotFile(IMG_URL, 100000).ok === true
+    && O.validateScreenshotFile(IMG_URL, 100000).kind === 'image'
+    && O.validateScreenshotFile(PDF_URL, 100000).ok === false
+    && O.validateScreenshotFile(PDF_URL, 100000).errors.join(' ').includes('statement box')
+    && O.validateScreenshotFile(IMG_URL, 600000).ok === false
+    && O.validateScreenshotFile('not-a-data-url', 100).ok === false);
+  check('OCR: normalise collapses line breaks and repairs OCR artefacts in amounts only',
+    O.normalizeOcrText('Available\nBalance\nRs 47,500.00') === 'Available Balance Rs 47,500.00'
+    && O.normalizeOcrText('Rs 47, 500.00') === 'Rs 47,500.00'
+    && O.normalizeOcrText('Rs 47,5O0.00') === 'Rs 47,500.00'
+    && O.normalizeOcrText('Total Balance PKR 1,25,000.00') === 'Total Balance PKR 1,25,000.00'
+    && O.normalizeOcrText('Hello World') === 'Hello World');
+  check('OCR: one clear total amount is read (the exact text the engine read in verification)',
+    (() => {
+      const a = O.extractScreenshotAmount('Available Balance\nRs 47,500.00');
+      const b = O.extractScreenshotAmount('Rs 2,500.00 debited from your JazzCash account 1234 at Daraz on 06-Nov-2026. Available balance Rs 47,500.00');
+      const c = O.extractScreenshotAmount('Total Balance: PKR 1,25,000.00');
+      return a.status === 'one' && a.amount === 47500
+        && b.status === 'one' && b.amount === 47500
+        && c.status === 'one' && c.amount === 125000;
+    })());
+  check('OCR: no amount / several amounts / a date set nothing — never a guess',
+    O.extractScreenshotAmount('Welcome to MyBank').status === 'none'
+    && O.extractScreenshotAmount('Balance as on 06-Nov-2026').status === 'none'
+    && O.extractScreenshotAmount('Available Balance Rs 47,500.00 Closing Balance Rs 45,000.00').status === 'ambiguous'
+    && O.extractScreenshotAmount('').status === 'none'
+    && O.extractScreenshotAmount('Available Balance Rs 47,500.00 Last transaction Rs 2,500.00').status === 'one');
+  check('OCR: screenshot text feeds the SAME parser as pasting — same draft, same rejections',
+    (() => {
+      const text = 'Rs 2,500.00 debited from your JazzCash account 1234 at Daraz on 06-Nov-2026. Available balance Rs 47,500.00';
+      const fromOcr = O.parseSmsFromOcrText(text);
+      const fromPaste = S.parseSms(text);
+      return JSON.stringify(fromOcr) === JSON.stringify(fromPaste)
+        && fromOcr.provider === 'JazzCash' && fromOcr.amount === 2500 && fromOcr.last4 === '1234'
+        && O.parseSmsFromOcrText('Your OTP is 123456') === null
+        && O.parseSmsFromOcrText('hello world') === null;
+    })());
+  check('OCR: recognizeImage with an injected engine returns its text; without one it fails plainly (browser only)',
+    (await (async () => {
+      const stub = async () => 'Available Balance Rs 47,500.00';
+      const got = await O.recognizeImage('fake-image', stub);
+      let threw = false;
+      try { await O.recognizeImage('fake-image'); } catch (e) { threw = /browser/.test(e.message); }
+      return got === 'Available Balance Rs 47,500.00' && threw;
+    })()) === true);
+  check('OCR: the module is on-device only — no external URL, no CDN, local vendor paths only',
+    !/https?:\/\//.test(ocrJs.replace(/\/\/[^\n]*/g, ''))
+    && ocrJs.includes("'/vendor/tesseract/'")
+    && O.OCR_FILES.every((f) => fs.existsSync(path.join(__dirname, 'public', 'vendor', 'tesseract', f)))
+    && fs.statSync(path.join(__dirname, 'public', 'vendor', 'tesseract', 'eng.traineddata')).size > 1000000);
+  check('OCR: markAccountBankConfirmed stamps the screenshot source — bank-sms is gone from the function',
+    modelJs.includes("source: 'total-amount-screenshot'")
+    && !/function markAccountBankConfirmed[\s\S]*?source: 'bank-sms'/.test(modelJs));
+  check('OCR UI: the Add page has the total-amount screenshot upload, and the app wires it',
+    pageHtml('add').includes('id="add-shot"') && pageHtml('add').includes('id="add-shot-status"')
+    && pageHtml('add').includes('id="add-shot-error"')
+    && pageHtml('add').includes('screenshot showing the total amount')
+    && appJs.includes('onScreenshotFile') && appJs.includes('Ocr.recognizeImage')
+    && appJs.includes('Ocr.extractScreenshotAmount') && appJs.includes('state.addScreenshot')
+    && appJs.includes("proof: state.addScreenshot || state.addProof || null")
+    && appJs.includes("setBaselineFromBank(state.vault, created.id, state.addProofBalance.amount, state.addProofBalance.source || 'statement')"));
+  check('OCR UI: the Intelligence page has the SMS screenshot upload, and the app wires it',
+    pageHtml('intelligence').includes('id="sms-shot"') && pageHtml('intelligence').includes('id="sms-shot-status"')
+    && pageHtml('intelligence').includes('Upload SMS screenshot')
+    && appJs.includes('onSmsShotFile') && appJs.includes('handleSmsDraft')
+    && appJs.includes("handleSmsDraft(draft, 'ocr')")
+    && appJs.includes('id="sms-amount"') && appJs.includes('fix it if the read is wrong')
+    && appJs.includes('currentDraftAmount'));
+  check('OCR UI: an OCR draft never updates directly — only the paste path takes the direct match',
+    appJs.includes("draft.source !== 'ocr'") && appJs.includes("match.status === 'match' && draft.source !== 'ocr'"));
+
   // 5e. Live smoke on a throwaway port (the real port 3036 is checked by hand below).
   const { spawn } = require('node:child_process');
   const TEST_PORT = 3037;
@@ -1422,19 +1554,28 @@ async function main() {
     }
     check('Smoke: server comes up on a fresh port', up);
     check('Smoke: /health ok', (await req('GET', '/health')).status === 200);
-    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/sms.js', '/csv.js', '/cards.js', '/intel.js', '/proof.js', '/totp.js', '/nav.js', '/app.js', '/bg.jpg']) {
+    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/sms.js', '/csv.js', '/cards.js', '/intel.js', '/proof.js', '/totp.js', '/nav.js', '/ocr.js', '/app.js', '/bg.jpg']) {
       check('Smoke: GET ' + p + ' -> 200', (await req('GET', p)).status === 200);
     }
+    // OCR engine (Phase 3.6): the vendored Tesseract files are served from
+    // this same origin — the app never fetches OCR code from a CDN.
+    for (const p of ['/vendor/tesseract/tesseract.min.js', '/vendor/tesseract/worker.min.js',
+      '/vendor/tesseract/tesseract-core.wasm.js', '/vendor/tesseract/tesseract-core.wasm',
+      '/vendor/tesseract/eng.traineddata']) {
+      check('Smoke: GET ' + p + ' -> 200', (await req('GET', p)).status === 200);
+    }
+    check('Smoke: vendor paths outside the OCR engine are not served', (await req('GET', '/vendor/tesseract/other.js')).status === 404);
     const home = await req('GET', '/');
     check('Smoke: homepage mentions the vault + no-recovery warning',
       home.raw.includes('Personal Card Vault') && home.raw.includes('No recovery, by design'));
     check('Smoke: the monthly-check page is in the served HTML (hash route #/reconcile)',
       home.raw.includes('id="page-reconcile"') && home.raw.includes('id="monthly-banner"'));
-    check('Smoke: homepage loads all nine shared scripts',
+    check('Smoke: homepage loads all ten shared scripts',
       home.raw.includes('/vault.js') && home.raw.includes('/model.js')
       && home.raw.includes('/sms.js') && home.raw.includes('/csv.js')
       && home.raw.includes('/cards.js') && home.raw.includes('/intel.js')
-      && home.raw.includes('/proof.js') && home.raw.includes('/totp.js') && home.raw.includes('/nav.js'));
+      && home.raw.includes('/proof.js') && home.raw.includes('/ocr.js')
+      && home.raw.includes('/totp.js') && home.raw.includes('/nav.js'));
     check('Smoke: unknown page -> 404', (await req('GET', '/nope.html')).status === 404);
   } finally {
     server.kill();
