@@ -190,16 +190,7 @@
             <button id="staff-add-btn">Add helper</button>
             <div id="staff-add-error" class="error"></div>
             <div id="staff-add-ok" class="ok"></div>
-          </div>
-          <div class="card">
-            <h3>Helpers</h3>
-            <label for="staff-month">Month (attendance &amp; pay)</label>
-            <input id="staff-month" type="month">
-            <div id="staff-list"></div>
-            <p id="staff-empty" class="muted">No helpers yet.</p>
-            <div id="staff-statement" class="review hidden"></div>
-          </div>
-          <div class="card">
+          </div>          <div class="card">
             <h3>Record an advance</h3>
             <p class="muted">Pick a helper, enter the advance, and choose how it comes back: all from the next pay, or a fixed amount each month until it is cleared. The remaining advance is always shown on the helper.</p>
             <label for="adv-helper">Helper</label>
@@ -220,8 +211,7 @@
             <button id="adv-add-btn">Record advance</button>
             <div id="adv-error" class="error"></div>
             <div id="adv-ok" class="ok"></div>
-          </div>
-          <div class="card">
+          </div>          <div class="card">
             <h3>Change a helper's salary</h3>
             <p class="muted">Pick a helper and enter the new monthly salary. It applies to the current month if it is not marked paid yet, and to later months — a month already marked paid keeps the salary it was paid under. A helper with paid months cannot be deleted, so a wrong salary is fixed here, not by deleting them.</p>
             <label for="salary-helper">Helper</label>
@@ -231,6 +221,13 @@
             <button id="salary-save-btn">Change salary</button>
             <div id="salary-error" class="error"></div>
             <div id="salary-ok" class="ok"></div>
+          </div>          <div class="card">
+            <h3>Helpers</h3>
+            <label for="staff-month">Month (attendance &amp; pay)</label>
+            <input id="staff-month" type="month">
+            <div id="staff-list"></div>
+            <p id="staff-empty" class="muted">No helpers yet.</p>
+            <div id="staff-statement" class="review hidden"></div>
           </div>
         </section>
 
@@ -266,15 +263,7 @@
             <button id="del-add-btn">Add delivery</button>
             <div id="del-add-error" class="error"></div>
             <div id="del-add-ok" class="ok"></div>
-          </div>
-          <div class="card">
-            <h3>Deliveries</h3>
-            <label for="del-month">Month (daily log &amp; bill)</label>
-            <input id="del-month" type="month">
-            <div id="deliveries-list"></div>
-            <p id="deliveries-empty" class="muted">No deliveries yet.</p>
-          </div>
-          <div class="card">
+          </div>          <div class="card">
             <h3>Log a day</h3>
             <p class="muted">Quantity delivered that day. Leave the usual quantity as it is, or enter 0 for a skipped day, or a bigger number for extra quantity.</p>
             <label for="log-delivery">Delivery</label>
@@ -291,8 +280,7 @@
             <p class="muted">The week and month buttons log every day up to today that has no log row yet, at the usual quantity. Days already logged are left alone.</p>
             <div id="log-error" class="error"></div>
             <div id="log-ok" class="ok"></div>
-          </div>
-          <div class="card">
+          </div>          <div class="card">
             <h3>Gas refill</h3>
             <p class="muted">For a gas cylinder delivery: the refill date and the price you paid, as you entered it. The days since the last refill are shown on the delivery.</p>
             <label for="refill-delivery">Delivery</label>
@@ -304,6 +292,12 @@
             <button id="refill-btn">Record refill</button>
             <div id="refill-error" class="error"></div>
             <div id="refill-ok" class="ok"></div>
+          </div>          <div class="card">
+            <h3>Deliveries</h3>
+            <label for="del-month">Month (daily log &amp; bill)</label>
+            <input id="del-month" type="month">
+            <div id="deliveries-list"></div>
+            <p id="deliveries-empty" class="muted">No deliveries yet.</p>
           </div>
         </section>
 
@@ -319,8 +313,7 @@
             <button id="udh-person-add-btn">Add person</button>
             <div id="udh-person-error" class="error"></div>
             <div id="udh-person-ok" class="ok"></div>
-          </div>
-          <div class="card">
+          </div>          <div class="card">
             <h3>Add an udhaar entry</h3>
             <label for="udh-entry-person">Person</label>
             <select id="udh-entry-person"></select>
@@ -340,14 +333,7 @@
             <button id="udh-entry-add-btn">Add entry</button>
             <div id="udh-entry-error" class="error"></div>
             <div id="udh-entry-ok" class="ok"></div>
-          </div>
-          <div class="card">
-            <h3>People &amp; entries</h3>
-            <div id="udhaar-list"></div>
-            <p id="udhaar-empty" class="muted">No udhaar entries yet.</p>
-            <div id="udh-reminder" class="review hidden"></div>
-          </div>
-          <div class="card">
+          </div>          <div class="card">
             <h3>Record a repayment</h3>
             <p class="muted">A repayment lowers the running balance of one entry. Repayments are kept as a list — nothing is edited or deleted after it is recorded. A repayment bigger than what is still outstanding is refused.</p>
             <label for="repay-person">Person</label>
@@ -361,8 +347,7 @@
             <button id="repay-add-btn">Record repayment</button>
             <div id="repay-error" class="error"></div>
             <div id="repay-ok" class="ok"></div>
-          </div>
-          <div class="card">
+          </div>          <div class="card">
             <h3>Forgive an amount</h3>
             <p class="muted">An amount you let go of is recorded as forgiven — never as a payment that never happened. It lowers the balance the same way a repayment does.</p>
             <label for="forgive-person">Person</label>
@@ -374,6 +359,11 @@
             <button id="forgive-add-btn">Record as forgiven</button>
             <div id="forgive-error" class="error"></div>
             <div id="forgive-ok" class="ok"></div>
+          </div>          <div class="card">
+            <h3>People &amp; entries</h3>
+            <div id="udhaar-list"></div>
+            <p id="udhaar-empty" class="muted">No udhaar entries yet.</p>
+            <div id="udh-reminder" class="review hidden"></div>
           </div>
         </section>
 
@@ -662,7 +652,6 @@
 <script src="/vault.js"></script>
 <script src="/model.js"></script>
 <script src="/csv.js"></script>
-<script src="/proof.js"></script>
 <script src="/nav.js"></script>
 <script src="/app.js"></script>
 </body>

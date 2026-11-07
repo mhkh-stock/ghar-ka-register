@@ -186,9 +186,12 @@ code.
   month.
 - The app never reads SMS, never fetches anything, and has no
   verification of any kind. The old vault's OCR files
-  (`public/ocr.js`, `public/vendor/`) stay on disk but are NOT loaded
-  in v1 — an optional "read the date off this photo" helper is a
-  later phase, with a review step.
+  (`public/ocr.js`, `public/vendor/`) and the old statement-proof
+  file (`public/proof.js`) were deleted in the D9/D11 cleanup
+  (2026-11-07) — they were never loaded by any page, and the OCR
+  module could not even be required (it depended on the deleted
+  `sms.js`). An optional "read the date off this photo" helper is a
+  later phase and would be built fresh, with a review step.
 
 ## Not in v1 (closed list)
 

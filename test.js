@@ -232,8 +232,14 @@ async function main() {
     const b = sectionBody(id) || '';
     return [...b.matchAll(/<h3[^>]*>([^<]*)<\/h3>/g)].map((m) => m[1].trim());
   }
-  check('Layout: Staff sections run form -> list -> action -> salary fix',
-    JSON.stringify(h3s('page-staff')) === JSON.stringify(['Add a helper', 'Helpers', 'Record an advance', "Change a helper's salary"]), h3s('page-staff'));
+  // D15: every page runs form(s) -> list -> actions, so the record
+  // forms sit before their lists (not after, reading as actions).
+  check('Layout: Staff sections run form -> form -> form -> list',
+    JSON.stringify(h3s('page-staff')) === JSON.stringify(['Add a helper', 'Record an advance', "Change a helper's salary", 'Helpers']), h3s('page-staff'));
+  check('Layout: Deliveries sections run form -> form -> form -> list',
+    JSON.stringify(h3s('page-deliveries')) === JSON.stringify(['Add a delivery', 'Log a day', 'Gas refill', 'Deliveries']), h3s('page-deliveries'));
+  check('Layout: Udhaar sections run form -> form -> form -> form -> list',
+    JSON.stringify(h3s('page-udhaar')) === JSON.stringify(['Add a person', 'Add an udhaar entry', 'Record a repayment', 'Forgive an amount', 'People &amp; entries']), h3s('page-udhaar'));
   check('Layout: Security sections run credentials -> change PIN -> change passphrase -> change Gmail -> recovery -> notes',
     JSON.stringify(h3s('page-security')) === JSON.stringify(['Your current PIN and passphrase', 'Change PIN', 'Change passphrase', 'Change login Gmail', 'Forgot-code recovery', 'How your book is protected']), h3s('page-security'));
   check('Layout: Summary sections run figures -> export',
@@ -650,7 +656,7 @@ async function main() {
   // Removed modules: gone from disk and unreferenced by the app code.
   // (server.js still lists them in its static allowlist — rename-only per
   // the plan — but the files do not exist, so they serve 404; checked in §9.)
-  for (const f of ['sms.js', 'intel.js', 'totp.js', 'cards.js']) {
+  for (const f of ['sms.js', 'intel.js', 'totp.js', 'cards.js', 'proof.js', 'ocr.js']) {
     check('Review: removed module ' + f + ' is deleted from public/',
       !fs.existsSync(path.join(__dirname, 'public', f)));
   }
@@ -658,11 +664,17 @@ async function main() {
     fs.readFileSync(path.join(__dirname, 'public', 'model.js'), 'utf8'),
     fs.readFileSync(path.join(__dirname, 'public', 'nav.js'), 'utf8')].join('\n');
   check('Review: no removed-module file or API is referenced by the app code',
-    !/(sms|intel|totp|cards)\.js|SmsParser|Intel\.|Totp\.|Cards\./.test(appCode));
-  check('Review: ocr.js + vendor stay on disk but are NOT loaded by any page',
-    fs.existsSync(path.join(__dirname, 'public', 'ocr.js'))
-    && fs.existsSync(path.join(__dirname, 'public', 'vendor', 'tesseract'))
-    && !/ocr\.js|vendor\//.test(htmlSrc) && !/ocr\.js|vendor\//.test(appSrc));
+    !/(sms|intel|totp|cards|proof|ocr)\.js|vendor\/|SmsParser|Intel\.|Totp\.|Cards\.|Proof\./.test(appCode));
+  // D9/D11 cleanup: the dead proof/OCR files are deleted from disk —
+  // proof.js was loaded but never called by the live app, ocr.js was
+  // never loaded by any page and could not even be required (it
+  // depended on the deleted sms.js), and the ~12 MB vendor engine
+  // was served but never fetched.
+  check('Review: proof.js, ocr.js and public/vendor are deleted (D9/D11)',
+    !fs.existsSync(path.join(__dirname, 'public', 'proof.js'))
+    && !fs.existsSync(path.join(__dirname, 'public', 'ocr.js'))
+    && !fs.existsSync(path.join(__dirname, 'public', 'vendor'))
+    && !/proof\.js|ocr\.js|vendor\//.test(htmlSrc) && !/proof\.js|ocr\.js|vendor\//.test(appSrc));
   // R1: the app never claims anything is confirmed / verified / real.
   const visibleHtml = htmlSrc.replace(/<[^>]*>/g, ' ');
   check('R1: index.html never says "confirmed", "verified" or "real"',
@@ -705,10 +717,10 @@ async function main() {
     serverSrc.includes('Ghar ka Register listening') && serverSrc.startsWith('// Ghar ka Register'));
   check('Review: server.js keeps the old app name out',
     !serverSrc.includes('Personal Card Vault'));
-  // The six scripts the shell needs are loaded, in order, and nothing else.
+  // The five scripts the shell needs are loaded, in order, and nothing else.
   const scriptOrder = [...htmlSrc.matchAll(/<script src="\/([a-z]+\.js)"><\/script>/g)].map((m) => m[1]);
-  check('Review: index.html loads exactly the six Phase-1 scripts in order',
-    JSON.stringify(scriptOrder) === JSON.stringify(['vault.js', 'model.js', 'csv.js', 'proof.js', 'nav.js', 'app.js']), scriptOrder);
+  check('Review: index.html loads exactly the five scripts in order',
+    JSON.stringify(scriptOrder) === JSON.stringify(['vault.js', 'model.js', 'csv.js', 'nav.js', 'app.js']), scriptOrder);
   check('Review: homepage names the app + the empty-Today state',
     htmlSrc.includes('Ghar ka Register') && htmlSrc.includes('Nothing due — add your first helper, bill or document.'));
   check('Review: homepage has all 11 page sections',
@@ -2607,36 +2619,34 @@ async function main() {
     check('Smoke: /health ok', (await req('GET', '/health')).status === 200);
     check('Smoke: /health body is {"ok":true}',
       (await req('GET', '/health')).raw === JSON.stringify({ ok: true }));
-    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/nav.js', '/app.js', '/csv.js', '/proof.js', '/bg.jpg', '/favicon.ico']) {
+    for (const p of ['/', '/index.html', '/styles.css', '/vault.js', '/model.js', '/nav.js', '/app.js', '/csv.js', '/bg.jpg', '/favicon.ico']) {
       check('Smoke: GET ' + p + ' -> 200', (await req('GET', p)).status === 200);
     }
     // Removed modules: no longer in the server allowlist (Phase 5
     // cleanup), so they 404 like any unknown path.
-    for (const p of ['/sms.js', '/intel.js', '/totp.js', '/cards.js']) {
+    for (const p of ['/sms.js', '/intel.js', '/totp.js', '/cards.js', '/proof.js', '/ocr.js']) {
       check('Smoke: GET ' + p + ' -> 404 (module removed)', (await req('GET', p)).status === 404);
     }
-    // ocr.js stays on disk (dormant, Phase 2) and is still served; it is
-    // simply never loaded by any page.
-    check('Smoke: GET /ocr.js -> 200 (dormant, on disk, not loaded)', (await req('GET', '/ocr.js')).status === 200);
-    // OCR engine (vendored Tesseract) is still served from this same origin.
+    // D9/D11 cleanup: the dead proof/OCR files and the vendored
+    // Tesseract engine are deleted, so none of them is served.
     for (const p of ['/vendor/tesseract/tesseract.min.js', '/vendor/tesseract/worker.min.js',
       '/vendor/tesseract/tesseract-core.wasm.js', '/vendor/tesseract/tesseract-core.wasm',
-      '/vendor/tesseract/eng.traineddata']) {
-      check('Smoke: GET ' + p + ' -> 200', (await req('GET', p)).status === 200);
+      '/vendor/tesseract/eng.traineddata', '/vendor/tesseract/other.js']) {
+      check('Smoke: GET ' + p + ' -> 404 (deleted in D9/D11 cleanup)', (await req('GET', p)).status === 404);
     }
-    check('Smoke: vendor paths outside the OCR engine are not served', (await req('GET', '/vendor/tesseract/other.js')).status === 404);
     const home = await req('GET', '/');
     check('Smoke: homepage names Ghar ka Register + spare-key trade-off',
       home.raw.includes('Ghar ka Register') && home.raw.includes('If someone can open the files on your PC, they can find the spare key'));
     check('Smoke: homepage shows the empty-Today state',
       home.raw.includes('Nothing due — add your first helper, bill or document.'));
-    check('Smoke: homepage loads the six Phase-1 scripts and no removed ones',
+    check('Smoke: homepage loads the five scripts and no removed ones',
       home.raw.includes('/vault.js') && home.raw.includes('/model.js')
-      && home.raw.includes('/csv.js') && home.raw.includes('/proof.js')
+      && home.raw.includes('/csv.js')
       && home.raw.includes('/nav.js') && home.raw.includes('/app.js')
       && !home.raw.includes('/sms.js') && !home.raw.includes('/intel.js')
       && !home.raw.includes('/totp.js') && !home.raw.includes('/cards.js')
-      && !home.raw.includes('/ocr.js'));
+      && !home.raw.includes('/proof.js') && !home.raw.includes('/ocr.js')
+      && !home.raw.includes('/vendor/'));
     check('Smoke: homepage has all 11 page sections',
       EXPECTED_PAGES.every((p) => home.raw.includes('id="page-' + p + '"')));
     check('Smoke: unknown page -> 404', (await req('GET', '/nope.html')).status === 404);

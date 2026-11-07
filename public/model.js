@@ -1116,7 +1116,7 @@ function deleteDocument(vault, docId) {
 // ---- Document photos ----
 // A photo is a JPEG or PNG data URL. The type is read from the file's
 // magic bytes — never from the file name or the claimed MIME. JPEG:
-// FF D8 FF. PNG: 89 50 4E 47 0D 0A 1A 0A. (Same pattern as proof.js.)
+// FF D8 FF. PNG: 89 50 4E 47 0D 0A 1A 0A.
 const MAX_PHOTO_INPUT_BYTES = 5 * 1024 * 1024; // 5 MB input cap, before downscaling
 function photoBytesFromDataUrl(dataUrl) {
   if (typeof dataUrl !== 'string') return null;

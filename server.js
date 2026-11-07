@@ -40,9 +40,8 @@ const MIME = {
   '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8',
   '.png': 'image/png', '.jpg': 'image/jpeg', '.ico': 'image/x-icon',
   '.svg': 'image/svg+xml', '.txt': 'text/plain; charset=utf-8',
-  // OCR (Phase 3.6): the vendored Tesseract engine lives in
-  // public/vendor/tesseract/ and is loaded on demand only, from this
-  // same origin — never from a CDN.
+  // '.wasm' kept for completeness; the vendored Tesseract engine was
+  // deleted in the D9/D11 cleanup, so no .wasm file is served.
   '.wasm': 'application/wasm',
 };
 function send(res, status, type, body) {
@@ -406,21 +405,14 @@ const server = http.createServer((req, res) => {
     return send(res, 200, 'application/json; charset=utf-8', JSON.stringify({ ok: true }));
   }
   if (req.method === 'GET' && (p === '/' || p === '/index.html')) return serveFile(res, 'index.html');
-  if (req.method === 'GET' && (p === '/styles.css' || p === '/vault.js' || p === '/model.js' || p === '/csv.js' || p === '/proof.js' || p === '/nav.js' || p === '/ocr.js' || p === '/app.js' || p === '/bg.jpg' || p === '/favicon.ico')) {
+  if (req.method === 'GET' && (p === '/styles.css' || p === '/vault.js' || p === '/model.js' || p === '/csv.js' || p === '/nav.js' || p === '/app.js' || p === '/bg.jpg' || p === '/favicon.ico')) {
     return serveFile(res, p.slice(1));
   }
   // The old vault modules (sms.js, intel.js, totp.js, cards.js) were
   // deleted in Phase 1 and are no longer listed here — they 404 by the
-  // fall-through below, like any unknown path.
-  // OCR engine (Phase 3.6): vendored Tesseract files, served from this
-  // same origin only. The language data is a plain .traineddata file
-  // (no .gz) — Tesseract is told gzip: false.
-  if (req.method === 'GET' && p.startsWith('/vendor/tesseract/')
-    && ['/vendor/tesseract/tesseract.min.js', '/vendor/tesseract/worker.min.js',
-      '/vendor/tesseract/tesseract-core.wasm.js', '/vendor/tesseract/tesseract-core.wasm',
-      '/vendor/tesseract/eng.traineddata'].includes(p)) {
-    return serveFile(res, p.slice(1));
-  }
+  // fall-through below, like any unknown path. The dead proof/OCR files
+  // (proof.js, ocr.js, public/vendor/tesseract/) were deleted in the
+  // D9/D11 cleanup and are no longer listed here either.
   // ---- P12 portal API (POST, JSON only, same-origin) ----
   if (req.method === 'POST' && (p === '/api/mail/status' || p === '/api/otp/request' || p === '/api/otp/verify'
     || p === '/api/recover/setup' || p === '/api/recover/reset' || p === '/api/recover/off')) {
