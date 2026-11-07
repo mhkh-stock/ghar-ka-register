@@ -49,6 +49,12 @@ code.
   Rs 15,000 − Rs 500 − Rs 2,000 = **Rs 12,500**. With no paid leave
   left it would pay Rs 11,500. A helper who joins on the 16th of a
   30-day month is paid for 15 days: Rs 7,500 before any deductions.
+  Net pay never goes below Rs 0: if an advance is bigger than the
+  month's pay, only what the month can pay is recovered and the rest
+  carries to next month (Rs 15,000 salary + Rs 20,000 advance →
+  net Rs 0, Rs 5,000 carries). An advance is recovered only from its
+  own month onward. Attendance cannot be marked before the join date
+  or in the future, and future days are disabled on the page.
 - **Deliveries** — doodhwala, newspaper, gas cylinder, water can,
   ironing, other; daily log (usual quantity, 0 = skipped day), monthly
   bill auto-summed from the log, "mark paid" per month, gas refill
@@ -100,18 +106,48 @@ code.
 - **Local-first:** all data lives ONLY in this browser (localStorage).
   The server serves the app shell only and stores NOTHING. No account
   on a server, no sync, no one else can see it.
-- **Unlock:** a 6-digit PIN (plus an optional passphrase) set on first
-  run. PIN → PBKDF2 (600,000 iterations, SHA-256) → AES-256-GCM
-  encrypts the whole vault at rest. No PIN = no data, even if someone
+- **Login portal (first run):** register with your Gmail, set a
+  6-digit code (+ an optional passphrase), and type the 6-digit code
+  sent to your Gmail. Next times the login shows your saved Gmail and
+  asks only for the code — the code is never saved, you type it every
+  time. The code → PBKDF2 (600,000 iterations, SHA-256) → AES-256-GCM
+  encrypts the whole vault at rest. No code = no data, even if someone
   copies the files.
+- **Forgot your code?** If a Gmail is linked, the login screen sends a
+  6-digit code to it; a new code opens the book (the old code stops
+  working, the passphrase is removed, and the spare key is replaced).
+  A book with no Gmail linked, or with recovery turned off, cannot be
+  reset — restore from a backup instead.
+- **Spare key (the trade-off, printed on the setup screen):** recovery
+  works through a random spare key kept in `data/recovery.key` on this
+  PC only (never committed, never uploaded). If someone can open the
+  files on your PC, they can find the spare key and open the book
+  without your code. Keep your PC locked. You can turn this recovery
+  off later in Security.
+- **Change login Gmail / recovery on-off:** on the Security page, only
+  while unlocked. Changing the Gmail sends a code to the NEW Gmail
+  first; the old Gmail gets a plain note that it changed (no code in
+  it). Turning recovery off deletes the spare key file and the spare
+  envelope; turning it back on makes a new pair (it asks for your
+  current code). Deleting the spare key file on its own only stops
+  forgot-code recovery — the book still opens with your code. The Profile page shows the login Gmail with a Change
+  link — the household contact email there is separate and untouched.
+- **Mail setup (for the codes to arrive):** the app sends the codes
+  from YOUR Gmail. Turn on 2-Step Verification on that Google
+  account, make an app password (Google Account → Security → App
+  passwords → Mail), then start the app with the two values below
+  (see Run). Without them, the code steps answer "mail is not set up"
+  and the book still works with a code only (no forgot-code) — link a
+  Gmail later in Security.
 - **Auto-lock** after 5 minutes without use; 5 wrong PINs → growing
   lockout delay (30s, doubling, cap 15 min).
 - **Change PIN / passphrase:** on the Security page you type your
   current PIN (and passphrase, if you set one) once at the top; both
   changes use those — the same credentials are never asked twice.
-- **No recovery, by design:** forgotten PIN = data unrecoverable.
-  There is no "forgot PIN" — that is the point of "on this device
-  only". Export an encrypted backup and keep it somewhere safe.
+- **Migration:** a book made before the portal (code only, no Gmail)
+  is asked once, after unlocking, to link a Gmail. The book, code,
+  passphrase and data stay the same. "Skip for now" asks again next
+  time; "Don't ask again" never asks again (link it later in Security).
 - **Encrypted backup:** export a backup file (restorable only with
   your PIN + passphrase). Backups made by the earlier builds of this
   app carry the old `personal-card-vault` label; backups made from
@@ -126,7 +162,9 @@ code.
   does not bless it.
 - No reminders when the app is closed (a local web app cannot push).
   Open the app and Today tells you what is due.
-- No recovery if the PIN is forgotten (by design, as above).
+- No recovery if the code is forgotten AND no Gmail is linked (or
+  recovery is turned off). Link a Gmail to turn forgot-code on, or
+  restore from an encrypted backup.
 - Renewal checklists are dated static text — rules change; the app
   says "check with the office". Fee figures in the checklists were
   checked against the official pages on 2026-11-06: NADRA Smart NIC
@@ -161,8 +199,9 @@ any verification claim.
 ## Run
 
 ```
-node server.js        # serves on :3036
-node test.js          # tests (must print ALL TESTS PASSED)
+node server.js        # serves on 127.0.0.1:3036 (localhost only — nothing on the network can reach it)
+GMAIL_USER=you@gmail.com GMAIL_APP_PASSWORD=xxxx node server.js   # with mail (codes by Gmail)
+node test.js          # tests (844 checks, must print ALL TESTS PASSED)
 ```
 
 Node 24+, zero dependencies. Design: the Code XR "Glassy Payment

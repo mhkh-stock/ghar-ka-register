@@ -13,41 +13,103 @@
   <span id="lock-pill" class="lock-pill locked">Locked</span>
 </header>
 <main>
-  <!-- STEP 1: first run — set the PIN that locks the book -->
+  <!-- STEP 1: first run — create the account (Gmail + code + OTP) -->
   <section id="setup-screen" class="card hidden">
-    <h2>Set up your home's book</h2>
-    <p class="muted">Your book lives <strong>only on this device</strong>. The server stores
-      nothing — not your PIN, not your entries. Everything is locked with
-      your PIN (and an optional passphrase) before it is saved.</p>
-    <div class="warn"><strong>No recovery, by design.</strong> If you forget your PIN (and
-      passphrase, if you set one), the book cannot be opened by anyone — not even
-      us. There is no "forgot PIN". Write your PIN down somewhere safe, or export
-      an encrypted backup (Backup &amp; Import) after setup.</div>
-    <p class="muted">A fresh book starts empty. An old Card Vault backup does not open
-      here — it restores only into the old code. Nothing is carried over.</p>
-    <label for="setup-pin">6-digit PIN</label>
+    <h2>Create your account</h2>
+    <p class="muted">One Gmail, one code. This book is yours alone — it lives
+      only on this device.</p>
+    <p class="muted">We will send a 6-digit code to your Gmail to check it is yours.
+      Your code is never saved — you type it every time you open the book.</p>
+    <label for="setup-gmail">Your Gmail</label>
+    <input id="setup-gmail" type="email" maxlength="80" autocomplete="email" placeholder="e.g. name@gmail.com">
+    <label for="setup-pin">Set a 6-digit secure code</label>
     <input id="setup-pin" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6" placeholder="e.g. 482917">
-    <label for="setup-pin2">Confirm PIN</label>
-    <input id="setup-pin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6" placeholder="type the PIN again">
+    <label for="setup-pin2">Type the code again</label>
+    <input id="setup-pin2" type="password" inputmode="numeric" autocomplete="new-password" maxlength="6" placeholder="type the code again">
     <label for="setup-pass">Optional passphrase (extra lock — at least 4 characters)</label>
     <input id="setup-pass" type="password" autocomplete="new-password" placeholder="leave empty if you don't want one">
     <button id="setup-btn">Create my book</button>
     <div id="setup-error" class="error"></div>
+    <div id="setup-mail-note" class="warn hidden">Mail is not set up on this PC yet, so no code can be sent. Ask the person who set up the app to add the Gmail app password, or continue without Gmail.</div>
+    <div id="setup-mail-error" class="error"></div>
+    <button id="setup-fallback-btn" class="hidden">Create without Gmail — no forgot-code later</button>
+    <div id="setup-otp-section" class="hidden">
+      <p id="setup-otp-note" class="muted"></p>
+      <label for="setup-otp">6-digit code from your Gmail</label>
+      <input id="setup-otp" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
+      <button id="setup-verify-btn">Verify code and create book</button>
+      <button id="setup-send-code-btn">Send code again</button>
+      <p class="muted"><a href="#" id="setup-change-gmail-link">Change Gmail</a></p>
+      <div id="setup-otp-error" class="error"></div>
+    </div>
+    <p class="muted">If someone can open the files on your PC, they can find the spare key and open the book without your code. Keep your PC locked. You can turn this recovery off later in Security.</p>
+    <p class="muted">A fresh book starts empty. An old Card Vault backup does not open
+      here — it restores only into the old code. Nothing is carried over.</p>
   </section>
 
   <!-- STEP 1: unlock -->
   <section id="unlock-screen" class="card hidden">
-    <h2>Unlock your book</h2>
-    <p class="muted">Enter your PIN to open the book on this device.</p>
-    <label for="unlock-pin">6-digit PIN</label>
+    <h2>Open your book</h2>
+    <p id="unlock-gmail-line" class="muted">Gmail: <span id="unlock-gmail-addr"></span></p>
+    <div id="unlock-gmail-input-wrap" class="hidden">
+      <label for="unlock-gmail">Your Gmail</label>
+      <input id="unlock-gmail" type="email" maxlength="80" autocomplete="email" placeholder="e.g. name@gmail.com">
+    </div>
+    <label for="unlock-pin">Secure code (6 digits)</label>
     <input id="unlock-pin" type="password" inputmode="numeric" autocomplete="current-password" maxlength="6" placeholder="••••••">
     <label for="unlock-pass">Passphrase (only if you set one)</label>
     <input id="unlock-pass" type="password" autocomplete="current-password" placeholder="leave empty if you didn't set one">
     <button id="unlock-btn">Unlock</button>
     <div id="unlock-error" class="error"></div>
     <div id="lockout-note" class="warn hidden"></div>
-    <p class="muted">5 wrong PINs lock the book for a growing delay (30s, then doubling,
+    <p class="muted"><a href="#" id="forgot-link">Forgot your code?</a> · <a href="#" id="not-gmail-link">Not your Gmail?</a></p>
+    <p class="muted">5 wrong codes lock the book for a growing delay (30s, then doubling,
       up to 15 minutes). The book locks itself after 5 minutes without use.</p>
+  </section>
+
+  <!-- Forgot your code? — reset with an OTP to the saved Gmail -->
+  <section id="reset-screen" class="card hidden">
+    <h2>Reset your code</h2>
+    <p id="reset-gmail-line" class="muted">We will send a 6-digit code to <span id="reset-gmail-addr"></span></p>
+    <p id="reset-off-note" class="warn hidden">Forgot-code is off for this book — your code cannot be reset. Restore from a backup instead.</p>
+    <button id="reset-send-btn">Send code</button>
+    <div id="reset-error" class="error"></div>
+    <div id="reset-otp-section" class="hidden">
+      <p id="reset-otp-note" class="muted"></p>
+      <label for="reset-otp">6-digit code from your Gmail</label>
+      <input id="reset-otp" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
+      <button id="reset-verify-btn">Verify code</button>
+      <div id="reset-otp-error" class="error"></div>
+    </div>
+    <div id="reset-new-section" class="hidden">
+      <label for="reset-new-pin">New secure code (6 digits)</label>
+      <input id="reset-new-pin" type="password" inputmode="numeric" maxlength="6" placeholder="e.g. 482917">
+      <label for="reset-new-pin2">Type the new code again</label>
+      <input id="reset-new-pin2" type="password" inputmode="numeric" maxlength="6" placeholder="type the new code again">
+      <button id="reset-btn">Set new code and open my book</button>
+      <div id="reset-new-error" class="error"></div>
+    </div>
+    <p class="muted"><a href="#" id="reset-back-link">Back to login</a></p>
+  </section>
+
+  <!-- Migration: an existing PIN-only vault links a Gmail (one time) -->
+  <section id="migration-screen" class="card hidden">
+    <h2>One more step: add your Gmail</h2>
+    <p class="muted">Your book and your code stay the same. Adding your Gmail turns
+      on forgot-code: if you forget your code, we send a code to your Gmail and you set a new one.</p>
+    <label for="mig-gmail">Your Gmail</label>
+    <input id="mig-gmail" type="email" maxlength="80" autocomplete="email" placeholder="e.g. name@gmail.com">
+    <button id="mig-send-btn">Send code</button>
+    <div id="mig-error" class="error"></div>
+    <div id="mig-mail-note" class="warn hidden">Mail is not set up on this PC yet, so no code can be sent. Ask the person who set up the app to add the Gmail app password, or continue without Gmail.</div>
+    <div id="mig-otp-section" class="hidden">
+      <p id="mig-otp-note" class="muted"></p>
+      <label for="mig-otp">6-digit code from your Gmail</label>
+      <input id="mig-otp" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
+      <button id="mig-verify-btn">Link Gmail</button>
+    </div>
+    <p class="muted"><a href="#" id="mig-skip-link">Skip for now — you can add it later in Security. Forgot-code will not work until then.</a></p>
+    <p class="muted"><a href="#" id="mig-dont-ask-link">Don't ask again</a></p>
   </section>
 
   <!-- The book: sidebar + one page per job -->
@@ -90,10 +152,11 @@
             </div>
             <div id="today-list"></div>
             <p id="today-empty" class="muted">Nothing due — add your first helper, bill or document.</p>
+            <div id="today-notice" class="ok hidden"></div>
           </div>
           <div class="card">
             <h3>Honest limits</h3>
-            <p class="muted">Nothing is fetched, checked or looked up — every record is as you entered it. A wrong date is a wrong date; the book shows it, it does not bless it. There are no reminders when the app is closed — open the app and Today tells you what is due. If the PIN is forgotten, the book cannot be opened (by design). Export an encrypted backup from Backup &amp; Import, and keep it somewhere safe.</p>
+            <p class="muted">Nothing is fetched, checked or looked up — every record is as you entered it. A wrong date is a wrong date; the book shows it, it does not bless it. There are no reminders when the app is closed — open the app and Today tells you what is due. If the code is forgotten, use Forgot your code? on the login screen. If the spare key file is deleted, forgot-code recovery stops working — the book still opens with your code. Export an encrypted backup from Backup &amp; Import, and keep it somewhere safe.</p>
           </div>
         </section>
 
@@ -158,6 +221,17 @@
             <div id="adv-error" class="error"></div>
             <div id="adv-ok" class="ok"></div>
           </div>
+          <div class="card">
+            <h3>Change a helper's salary</h3>
+            <p class="muted">Pick a helper and enter the new monthly salary. It applies to the current month if it is not marked paid yet, and to later months — a month already marked paid keeps the salary it was paid under. A helper with paid months cannot be deleted, so a wrong salary is fixed here, not by deleting them.</p>
+            <label for="salary-helper">Helper</label>
+            <select id="salary-helper"></select>
+            <label for="salary-new">New monthly salary (Rs)</label>
+            <input id="salary-new" type="number" inputmode="numeric" min="1" placeholder="e.g. 16000">
+            <button id="salary-save-btn">Change salary</button>
+            <div id="salary-error" class="error"></div>
+            <div id="salary-ok" class="ok"></div>
+          </div>
         </section>
 
         <!-- DELIVERIES -->
@@ -210,6 +284,11 @@
             <label for="log-qty">Quantity delivered (0 = skipped day)</label>
             <input id="log-qty" type="number" inputmode="decimal" min="0" max="10000" placeholder="e.g. 1">
             <button id="log-btn">Log this day</button>
+            <div class="row">
+              <button type="button" id="log-week-btn" class="secondary">Log this whole week</button>
+              <button type="button" id="log-month-btn" class="secondary">Log this whole month</button>
+            </div>
+            <p class="muted">The week and month buttons log every day up to today that has no log row yet, at the usual quantity. Days already logged are left alone.</p>
             <div id="log-error" class="error"></div>
             <div id="log-ok" class="ok"></div>
           </div>
@@ -388,7 +467,7 @@
             <label for="med-name">Name</label>
             <input id="med-name" type="text" maxlength="80" placeholder="e.g. Panadol">
             <label for="med-qty">Quantity left</label>
-            <input id="med-qty" type="number" inputmode="numeric" min="0" placeholder="e.g. 10">
+            <input id="med-qty" type="number" inputmode="decimal" min="0" step="0.5" placeholder="e.g. 10">
             <label for="med-unit">Unit</label>
             <input id="med-unit" type="text" maxlength="20" placeholder="e.g. tablets">
             <label for="med-expiry">Expiry date</label>
@@ -453,7 +532,7 @@
           <a class="back-link" href="#/home">← Back to Today</a>
           <div class="card" id="security-settings-card">
             <h2>Security settings</h2>
-            <p class="muted">The book opens with your PIN only. It locks itself after 5 minutes without use. 5 wrong PINs lock it for a growing delay (30s, then doubling, up to 15 minutes).</p>
+            <p class="muted">The book opens with your PIN (and passphrase, if you set one). It locks itself after 5 minutes without use. 5 wrong PINs lock it for a growing delay (30s, then doubling, up to 15 minutes).</p>
             <h3>Your current PIN and passphrase</h3>
             <p class="muted">Type them once here — both changes below use these.</p>
             <label for="security-pin">Current PIN</label>
@@ -475,6 +554,44 @@
             <button id="change-pass-btn">Change passphrase</button>
             <div id="change-pass-error" class="error"></div>
             <div id="change-pass-ok" class="ok"></div>
+            <h3>Change login Gmail</h3>
+            <div id="change-gmail-section">
+              <p class="muted">Your login Gmail is <span id="change-gmail-current"></span>. A code goes to the NEW Gmail first — the old Gmail gets a plain note that it changed (no code in it). Your spare key is not affected.</p>
+              <label for="change-gmail-new">New Gmail</label>
+              <input id="change-gmail-new" type="email" maxlength="80" placeholder="e.g. newname@gmail.com">
+              <button id="change-gmail-send-btn">Send code</button>
+              <div id="change-gmail-otp-section" class="hidden">
+                <p class="muted" id="change-gmail-otp-note"></p>
+                <label for="change-gmail-otp">Code from your new Gmail (6 digits)</label>
+                <input id="change-gmail-otp" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
+                <button id="change-gmail-verify-btn">Verify code</button>
+                <button id="change-gmail-resend-btn" type="button">Send code again</button>
+                <div id="change-gmail-otp-error" class="error"></div>
+              </div>
+              <div id="change-gmail-error" class="error"></div>
+              <div id="change-gmail-ok" class="ok"></div>
+            </div>
+            <p class="muted hidden" id="change-gmail-unavailable">Link a Gmail first, in Forgot-code recovery below — then you can change it here.</p>
+            <h3>Forgot-code recovery</h3>
+            <p class="muted" id="recovery-status"></p>
+            <div id="recovery-gmail-wrap" class="hidden">
+              <label for="recovery-gmail">Gmail to link</label>
+              <input id="recovery-gmail" type="email" maxlength="80" placeholder="e.g. name@gmail.com">
+              <button id="recovery-send-btn">Send code</button>
+              <div id="recovery-otp-section" class="hidden">
+                <p class="muted" id="recovery-otp-note"></p>
+                <label for="recovery-otp">Code from your Gmail (6 digits)</label>
+                <input id="recovery-otp" type="text" inputmode="numeric" maxlength="6" placeholder="••••••">
+                <button id="recovery-verify-btn">Verify code</button>
+                <button id="recovery-resend-btn" type="button">Send code again</button>
+                <div id="recovery-otp-error" class="error"></div>
+              </div>
+            </div>
+            <p class="muted hidden" id="recovery-on-note">Type your current code (and passphrase, if you set one) in the boxes at the top first — turning recovery back on needs them to make a new spare key.</p>
+            <button id="recovery-on-btn" class="hidden">Turn recovery on</button>
+            <button id="recovery-off-btn" class="hidden">Turn recovery off</button>
+            <div id="recovery-error" class="error"></div>
+            <div id="recovery-ok" class="ok"></div>
           </div>
           <div class="card" id="security-card">
             <h3>How your book is protected</h3>
@@ -514,6 +631,8 @@
             <p class="muted">Your household name and month start day live <strong>inside the book</strong> — encrypted with everything else, only on this device. Nothing is uploaded anywhere. The month start day is recorded for your reference only: staff pay and delivery bills still follow the calendar month (1st to last day).</p>
             <p class="muted">Phone, email and a profile picture are <strong>optional</strong> — leave any of them empty and the book works the same. They stay on this device only, inside the encrypted book, and are never sent anywhere.</p>
             <h3>Your details</h3>
+            <p class="muted" id="profile-login-gmail-line">Login Gmail: <span id="profile-login-gmail"></span> · <a href="#/security" id="profile-login-gmail-change">Change</a></p>
+            <p class="muted hidden" id="profile-login-gmail-none">No login Gmail yet — add one in <a href="#/security">Security</a> to turn on forgot-code.</p>
             <div class="profile-photo-wrap">
               <img id="profile-photo-preview" class="dp-img large hidden" alt="Profile photo">
               <span id="profile-photo-initials" class="dp-initials large">V</span>

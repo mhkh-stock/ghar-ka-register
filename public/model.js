@@ -68,7 +68,16 @@ function isDateStr(s) {
   const d = new Date(s + 'T00:00:00Z');
   return !isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 }
-function todayStr() { return new Date().toISOString().slice(0, 10); }
+function localDateStr(date) {
+  const d = date || new Date();
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+    + '-' + String(d.getDate()).padStart(2, '0');
+}
+// "Today" in the user's own timezone, not UTC: the old toISOString()
+// version called Nov 6 "today" for the first five hours of every
+// Pakistan day. Every date in the book (dose dates, attendance, pay)
+// is a local calendar date, so today must be one too.
+function todayStr() { return localDateStr(); }
 function daysBetween(fromDateStr, toDateStr) {
   const from = new Date(fromDateStr + 'T00:00:00Z');
   const to = new Date(toDateStr + 'T00:00:00Z');
@@ -137,6 +146,11 @@ function validateEmail(email) {
     return 'Email must look like name@example.com.';
   }
   return null;
+}
+// Login Gmail normalisation (P12 portal): trim + lower-case. The login
+// Gmail is an identifier, not a secret; the code is the lock.
+function normalizeGmail(gmail) {
+  return String(gmail == null ? '' : gmail).trim().toLowerCase();
 }
 function setHousehold(vault, input) {
   const errors = [];
@@ -247,6 +261,36 @@ function addStaff(vault, input) {
   vault.staff.push(helper);
   return helper;
 }
+// Remove a helper (the user's own data). The UI asks twice; the model
+// just removes them and returns them. A helper with any paid month is
+// refused: their paid months are locked records, and deleting the
+// helper would destroy them.
+function deleteStaff(vault, staffId) {
+  const helper = findStaff(vault, staffId);
+  if (!helper) throw fail('NOT_FOUND', 'Helper does not exist.');
+  if ((helper.paidMonths || []).length > 0) {
+    throw fail('LOCKED', 'That helper has paid months, which are locked and cannot be deleted.');
+  }
+  const idx = (vault.staff || []).findIndex((s) => s.id === staffId);
+  return vault.staff.splice(idx, 1)[0];
+}
+// Change a helper's monthly salary going forward. Paid months keep the
+// working they were paid under, so a salary change never rewrites
+// history — but the current month, once marked paid, is locked: a
+// change then would look like it fixes the paid month, so it refuses.
+function updateStaffSalary(vault, staffId, salaryPkr) {
+  const helper = findStaff(vault, staffId);
+  if (!helper) throw fail('NOT_FOUND', 'Helper does not exist.');
+  const salary = Number(salaryPkr);
+  if (!isIntRs(salary) || salary <= 0) {
+    throw fail('VALIDATION', 'Monthly salary must be whole rupees above 0.');
+  }
+  if (isStaffMonthPaid(helper, monthKeyOf(todayStr()))) {
+    throw fail('LOCKED', 'This month is already marked paid and cannot be edited.');
+  }
+  helper.salaryPkr = salary;
+  return helper;
+}
 function findStaff(vault, id) {
   return (vault.staff || []).find((s) => s.id === id) || null;
 }
@@ -276,6 +320,12 @@ function markAttendance(vault, staffId, dateStr, mark) {
   if (isStaffMonthPaid(helper, monthKeyOf(dateStr))) {
     throw fail('LOCKED', 'That month is already marked paid and cannot be edited.');
   }
+  if (typeof helper.joinedDate === 'string' && dateStr < helper.joinedDate) {
+    throw fail('VALIDATION', 'Attendance cannot be marked before the join date (' + helper.joinedDate + ').');
+  }
+  if (dateStr > todayStr()) {
+    throw fail('VALIDATION', 'Attendance cannot be marked in the future.');
+  }
   if (m === 'present') delete helper.attendance[dateStr];
   else helper.attendance[dateStr] = m;
   return { date: dateStr, mark: m };
@@ -284,6 +334,9 @@ function attendanceCounts(helper, monthKey) {
   let absentDays = 0, halfDays = 0;
   for (const [dateStr, mark] of Object.entries(helper.attendance || {})) {
     if (monthKeyOf(dateStr) !== monthKey) continue;
+    // Marks stored before the join date (an old hole: attendance could
+    // be marked before the helper joined) never deduct.
+    if (typeof helper.joinedDate === 'string' && dateStr < helper.joinedDate) continue;
     if (mark === 'absent') absentDays++;
     else if (mark === 'half') halfDays++;
   }
@@ -342,6 +395,48 @@ function advanceMonthRecovery(adv) {
   if (adv.recovery === 'instalments') return Math.min(Number(adv.instalmentPkr) || 0, remaining);
   return remaining;
 }
+// An advance can only be recovered from its own month onward: an
+// advance dated later than the month being paid waits for its own
+// month — it never deducts from an earlier month's pay.
+function advanceIsDueForMonth(adv, monthKey) {
+  return typeof adv.date === 'string' && adv.date.slice(0, 7) <= monthKey;
+}
+// How this month's pay is split across the due advances, in the order
+// they were added. Recovery never exceeds the pay left after the
+// absence deductions: what is left over carries to the next month
+// instead of making the net negative. recoveredPkr is never grown
+// beyond what the month actually recovered.
+function advanceRecoveryPlan(helper, monthKey, availablePkr) {
+  let cap = Math.max(0, Math.round(availablePkr || 0));
+  const plan = [];
+  let recovery = 0;
+  let carried = 0;
+  for (const adv of (helper.advances || [])) {
+    if (!advanceIsDueForMonth(adv, monthKey)) continue;
+    const want = advanceMonthRecovery(adv);
+    if (want <= 0) continue;
+    const take = Math.min(want, cap);
+    plan.push({ advance: adv, take });
+    recovery += take;
+    carried += want - take;
+    cap -= take;
+  }
+  return { plan, recovery, carriedPkr: roundRs(carried) };
+}
+// Remove an advance (the user's own data). The UI asks twice; the model
+// just removes it and returns it. An advance whose month is already
+// marked paid is refused: its recovery is part of a locked month.
+function deleteAdvance(vault, staffId, advanceId) {
+  const helper = findStaff(vault, staffId);
+  if (!helper) throw fail('NOT_FOUND', 'Helper does not exist.');
+  const idx = (helper.advances || []).findIndex((a) => a.id === advanceId);
+  if (idx < 0) throw fail('NOT_FOUND', 'Advance does not exist.');
+  const adv = helper.advances[idx];
+  if (isStaffMonthPaid(helper, monthKeyOf(adv.date))) {
+    throw fail('LOCKED', 'That advance\u2019s month is already marked paid and cannot be edited.');
+  }
+  return helper.advances.splice(idx, 1)[0];
+}
 
 // Month-end pay, worked out line by line. Rounding: every figure is
 // rounded to the nearest whole rupee (halves round up, Math.round).
@@ -378,7 +473,11 @@ function payWorkingForHelper(helper, monthKey) {
   const freeDaysUsed = absentFree + halfFree;
   const absentDeduction = roundRs(chargedAbsentDays * fullSalary / 30);
   const halfDeduction = roundRs(chargedHalfDays * fullSalary / 60);
-  const advanceRecovery = (helper.advances || []).reduce((s, a) => s + advanceMonthRecovery(a), 0);
+  // Advance recovery is capped at the pay left after the deductions,
+  // so the net never goes negative; the shortfall carries forward.
+  const recoveryPlan = advanceRecoveryPlan(helper, monthKey, salaryPkr - absentDeduction - halfDeduction);
+  const advanceRecovery = recoveryPlan.recovery;
+  const advanceCarriedPkr = recoveryPlan.carriedPkr;
   return {
     fullSalaryPkr: fullSalary,
     salaryPkr,
@@ -394,7 +493,8 @@ function payWorkingForHelper(helper, monthKey) {
     absentDeduction,
     halfDeduction,
     advanceRecovery,
-    netPkr: roundRs(salaryPkr - absentDeduction - halfDeduction - advanceRecovery),
+    advanceCarriedPkr,
+    netPkr: Math.max(0, roundRs(salaryPkr - absentDeduction - halfDeduction - advanceRecovery)),
     daysInMonth: dim,
   };
 }
@@ -421,6 +521,7 @@ function normalizeWorking(w) {
     absentDeduction: Number(base.absentDeduction) || 0,
     halfDeduction: Number(base.halfDeduction) || 0,
     advanceRecovery: Number(base.advanceRecovery) || 0,
+    advanceCarriedPkr: Number(base.advanceCarriedPkr) || 0,
     netPkr: Number(base.netPkr) || 0,
     daysInMonth: Number(base.daysInMonth) || 30,
   };
@@ -450,8 +551,13 @@ function markMonthPaid(vault, staffId, monthKey, paidDate) {
     throw fail('LOCKED', 'That month is already marked paid.');
   }
   const working = payWorkingForHelper(helper, monthKey);
-  for (const adv of (helper.advances || [])) {
-    adv.recoveredPkr = roundRs(Number(adv.recoveredPkr || 0) + advanceMonthRecovery(adv));
+  // Apply exactly the recovery the working shows: only advances due
+  // this month, capped at the pay left after deductions. The rest of a
+  // big advance stays unrecovered and carries to the next month.
+  const plan = advanceRecoveryPlan(helper, monthKey,
+    working.salaryPkr - working.absentDeduction - working.halfDeduction);
+  for (const step of plan.plan) {
+    step.advance.recoveredPkr = roundRs(Number(step.advance.recoveredPkr || 0) + step.take);
   }
   const record = { month: monthKey, working, netPkr: working.netPkr, paidDate: paidDate || todayStr() };
   helper.paidMonths.push(record);
@@ -488,6 +594,9 @@ function staffPayStatement(helper, monthKey) {
       + ' - ' + fmtRs(w.halfDeduction) + ' - ' + fmtRs(w.advanceRecovery)
       + ' = ' + fmtRs(w.netPkr),
   );
+  if (w.advanceCarriedPkr > 0) {
+    lines.push(fmtRs(w.advanceCarriedPkr) + ' of this advance carries to next month — it was bigger than this month\u2019s pay.');
+  }
   if (paid) lines.push('Paid on ' + paid.paidDate + ' — this month is locked.');
   else lines.push('Not yet marked paid — as you entered it.');
   return lines.join('\n');
@@ -576,7 +685,8 @@ function lastGasRefill(delivery) {
 function gasDaysSinceLastRefill(delivery, today) {
   const last = lastGasRefill(delivery);
   if (!last) return null;
-  return daysBetween(last.date, today || todayStr());
+  // A refill dated in the future reads as 0 days ago, never negative.
+  return Math.max(0, daysBetween(last.date, today || todayStr()));
 }
 // Monthly total, recomputed from the daily log rows every time. Days
 // that were never logged contribute nothing. lines groups the logged
@@ -626,6 +736,19 @@ function markDeliveryMonthPaid(vault, deliveryId, monthKey, paidDate) {
   d.paidMonths.push(record);
   return record;
 }
+// Remove a delivery (the user's own data). The UI asks twice; the model
+// just removes it and returns it. A delivery with any paid month is
+// refused: its paid months are locked records, and deleting the
+// delivery would destroy them.
+function deleteDelivery(vault, deliveryId) {
+  const d = findDelivery(vault, deliveryId);
+  if (!d) throw fail('NOT_FOUND', 'Delivery does not exist.');
+  if ((d.paidMonths || []).length > 0) {
+    throw fail('LOCKED', 'That delivery has paid months, which are locked and cannot be deleted.');
+  }
+  const idx = (vault.deliveries || []).findIndex((x) => x.id === deliveryId);
+  return vault.deliveries.splice(idx, 1)[0];
+}
 
 // ---- Udhaar ----
 function validateUdhaarPerson(input) {
@@ -640,6 +763,16 @@ function addUdhaarPerson(vault, input) {
   const p = { id: newId(), person: trimStr(input.person, 60), entries: [] };
   vault.udhaar.push(p);
   return p;
+}
+// Remove an udhaar person and all their entries (the user's own data).
+// The UI asks twice; the model just removes them and returns them.
+// Udhaar has no locked months, so there is no month to refuse on —
+// repayments stay append-only by design, but the person and their
+// entries can be removed outright when they were entered wrong.
+function deleteUdhaarPerson(vault, personId) {
+  const idx = (vault.udhaar || []).findIndex((p) => p.id === personId);
+  if (idx < 0) throw fail('NOT_FOUND', 'Person does not exist.');
+  return vault.udhaar.splice(idx, 1)[0];
 }
 function findUdhaarPerson(vault, id) {
   return (vault.udhaar || []).find((p) => p.id === id) || null;
@@ -700,6 +833,16 @@ function udhaarPersonBalance(person) {
 function findUdhaarEntry(person, entryId) {
   if (!person) return null;
   return (person.entries || []).find((e) => e.id === entryId) || null;
+}
+// Remove one udhaar entry (the user's own data). The UI asks twice;
+// the model just removes it and returns it. Repayments are append-only
+// by design, but a wrongly entered entry can be removed outright.
+function deleteUdhaarEntry(vault, personId, entryId) {
+  const person = findUdhaarPerson(vault, personId);
+  if (!person) throw fail('NOT_FOUND', 'Person does not exist.');
+  const idx = (person.entries || []).findIndex((e) => e.id === entryId);
+  if (idx < 0) throw fail('NOT_FOUND', 'Udhaar entry does not exist.');
+  return person.entries.splice(idx, 1)[0];
 }
 // Record one repayment against an entry. Repayments are append-only in
 // v1: there is no edit or delete for them. The amount must be whole
@@ -1075,8 +1218,10 @@ function validateMedicine(input) {
   const name = trimStr(input.name, 80);
   if (!name) errors.push('name is required');
   const qty = Number(input.qtyLeft);
-  if (!Number.isInteger(qty) || qty < 0 || qty > 100000) {
-    errors.push('quantity left must be a whole number from 0 up');
+  // Quantities come in 0.5 steps (half a tablet is a real amount);
+  // anything else is a typo. The dose tick is still exactly 1.
+  if (!Number.isFinite(qty) || qty < 0 || qty > 100000 || Math.round(qty * 2) !== qty * 2) {
+    errors.push('quantity left must be a number in 0.5 steps from 0 up');
   }
   if (!isDateStr(input.expiryDate)) errors.push('expiry date must be YYYY-MM-DD');
   if (input.place !== undefined && input.place !== null && input.place !== '' && !MEDICINE_PLACES.includes(input.place)) {
@@ -1151,6 +1296,9 @@ function recordDose(vault, medId, input) {
   if (errors.length) throw fail('VALIDATION', 'Dose is not valid.', errors);
   if (Number(med.qtyLeft) <= 0) {
     throw fail('VALIDATION', 'None left — quantity is 0, so no dose can be recorded.');
+  }
+  if (Number(med.qtyLeft) < 1) {
+    throw fail('VALIDATION', 'Less than one dose left — quantity is ' + Number(med.qtyLeft) + ', so no dose can be recorded.');
   }
   const dose = { date: input.date, time: input.time };
   med.dosesTaken.push(dose);
@@ -1467,6 +1615,31 @@ function todayItems(vault, today) {
       });
     }
   }
+  // Udhaar with no due date: one row per person with undated money
+  // still outstanding. It has no date, so it goes last, after every
+  // dated row.
+  const undated = [];
+  for (const p of (vault.udhaar || [])) {
+    let lent = 0, borrowed = 0;
+    for (const e of (p.entries || [])) {
+      if (e.settled) continue;
+      if (e.dueDate) continue;
+      const bal = udhaarEntryBalance(e);
+      if (bal <= 0) continue;
+      if (e.direction === 'lent') lent = roundRs(lent + bal);
+      else borrowed = roundRs(borrowed + bal);
+    }
+    if (lent <= 0 && borrowed <= 0) continue;
+    const parts = [];
+    if (lent > 0) parts.push(fmtRs(lent) + ' lent still outstanding');
+    if (borrowed > 0) parts.push(fmtRs(borrowed) + ' borrowed still outstanding');
+    undated.push({
+      kind: 'udhaar',
+      title: p.person + ' — udhaar, no due date',
+      detail: parts.join(' · ') + ' · as you entered it',
+      date: '', overdue: false, daysUntil: null, link: '#/udhaar', noDueDate: true,
+    });
+  }
   // Staff pay: the month's pay falls due at month end. From 7 days before
   // the last day of the month (and after it, until marked paid) the helper
   // shows on Today. Paid months never show.
@@ -1479,46 +1652,92 @@ function todayItems(vault, today) {
   if (daysToMonthEnd <= 7) {
     for (const s of (vault.staff || [])) {
       if ((s.paidMonths || []).some((pm) => pm.month === monthKey)) continue;
+      // The worked net, not just the salary: salary minus absence
+      // deductions minus this month's advance recovery.
+      let detail = fmtRs(s.salaryPkr) + ' monthly salary · as you entered it';
+      try {
+        const w = payWorkingForHelper(s, monthKey);
+        detail = fmtRs(w.netPkr) + ' net payable · ' + fmtRs(w.salaryPkr) + ' salary'
+          + ' − ' + fmtRs(w.absentDeduction) + ' absent − ' + fmtRs(w.halfDeduction) + ' half'
+          + ' − ' + fmtRs(w.advanceRecovery) + ' advance · as you entered it';
+      } catch (_e) { /* salary-only detail above */ }
       items.push({
         kind: 'staff', title: s.name + ' — pay due (' + s.role + ')',
-        detail: fmtRs(s.salaryPkr) + ' monthly salary · as you entered it',
+        detail,
         date: lastDateStr, overdue: daysToMonthEnd < 0, daysUntil: daysToMonthEnd, link: '#/staff',
       });
     }
   }
   // Soonest first; overdue first within the same date.
   items.sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+  // Undated udhaar has no date — it goes last, after every dated row.
+  for (const u of undated) items.push(u);
   return items;
 }
 
 function dueLabel(item) {
   if (!item) return '';
+  if (item.noDueDate) return 'no due date';
   if (item.daysUntil < 0) return 'OVERDUE by ' + (-item.daysUntil) + ((-item.daysUntil) === 1 ? ' day' : ' days');
   if (item.daysUntil === 0) return 'due today';
   return 'due in ' + item.daysUntil + (item.daysUntil === 1 ? ' day' : ' days');
+}
+
+// ---- P12 login portal: migration status + Gmail change ----
+// An existing PIN-only vault is asked once to link a Gmail after it is
+// opened with the current code. 'linked' = an account binding exists.
+// 'dismissed' = the user chose "Don't ask again" (stored on the vault).
+// 'pending' = ask them. The vault object itself is never changed in
+// place — markMigrationDismissed returns a new vault with the flag set.
+const MIGRATION_OPTIONS = {
+  LINK_GMAIL: 'link_gmail',
+  SKIP_FOR_NOW: 'skip_for_now',
+  DONT_ASK_AGAIN: 'dont_ask_again',
+};
+
+function migrationStatusFromVault(vault, account) {
+  if (account && account.gmail) return 'linked';
+  if (vault && vault.migrationDismissed === true) return 'dismissed';
+  return 'pending';
+}
+function markMigrationDismissed(vault) {
+  const next = Object.assign({}, vault);
+  next.migrationDismissed = true;
+  return next;
+}
+// Returns true when the change is allowed, else an error code:
+// NO_GMAIL (empty), INVALID_GMAIL (bad shape), SAME_GMAIL (unchanged).
+function isValidGmailChange(newGmail, account) {
+  if (typeof newGmail !== 'string' || newGmail.trim() === '') return 'NO_GMAIL';
+  const gmail = normalizeGmail(newGmail);
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gmail)) return 'INVALID_GMAIL';
+  if (account && account.gmail && normalizeGmail(account.gmail) === gmail) return 'SAME_GMAIL';
+  return true;
 }
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     STAFF_ROLES, DELIVERY_KINDS, DELIVERY_UNITS, BILL_TYPES, DOCUMENT_TYPES,
     MEDICINE_PLACES, ATTENDANCE_MARKS, MAX_MONEY, MAX_PHOTO_BYTES,
-    newId, roundRs, isIntRs, isDateStr, todayStr, daysBetween, fmtRs,
+    newId, roundRs, isIntRs, isDateStr, todayStr, localDateStr, daysBetween, fmtRs,
     isMonthKey, daysInMonth, monthKeyOf,
-    isGharVault, emptyVault, setHousehold, validatePhone, validateEmail,
+    isGharVault, emptyVault, setHousehold, validatePhone, validateEmail, normalizeGmail,
     setHouseholdPhoto, normalizeHousehold,
-    validateStaff, addStaff, findStaff,
-    markAttendance, attendanceCounts, addAdvance, advanceRemaining,
-    staffRemainingAdvance, advanceMonthRecovery, payWorkingForHelper,
+    MIGRATION_OPTIONS, migrationStatusFromVault, markMigrationDismissed, isValidGmailChange,
+    validateStaff, addStaff, findStaff, deleteStaff, updateStaffSalary,
+    markAttendance, attendanceCounts, addAdvance, deleteAdvance, advanceRemaining,
+    staffRemainingAdvance, advanceMonthRecovery, advanceIsDueForMonth,
+    advanceRecoveryPlan, payWorkingForHelper,
     normalizeWorking, fmtDays,
     computeMonthPay, markMonthPaid, staffPayStatement,
     findPaidStaffMonth, isStaffMonthPaid,
     validateDelivery, addDelivery, findDelivery,
     logDelivery, addGasRefill, lastGasRefill, gasDaysSinceLastRefill,
     deliveryMonthTotal, markDeliveryMonthPaid,
-    findPaidDeliveryMonth, isDeliveryMonthPaid,
-    validateUdhaarPerson, addUdhaarPerson, findUdhaarPerson,
+    findPaidDeliveryMonth, isDeliveryMonthPaid, deleteDelivery,
+    validateUdhaarPerson, addUdhaarPerson, deleteUdhaarPerson, findUdhaarPerson,
     validateUdhaarEntry, addUdhaarEntry, udhaarEntryBalance, udhaarPersonBalance,
-    findUdhaarEntry, recordRepayment, forgiveUdhaar, udhaarReminderText,
+    findUdhaarEntry, deleteUdhaarEntry, recordRepayment, forgiveUdhaar, udhaarReminderText,
     validateBill, addBill, findBill, markBillPaid, markBillUnpaid, deleteBill,
     validateDocument, addDocument, findDocument, documentDaysUntil,
     documentReminder, deleteDocument, getChecklist, CHECKLISTS,
@@ -1534,23 +1753,25 @@ if (typeof window !== 'undefined') {
   window.GharModel = {
     STAFF_ROLES, DELIVERY_KINDS, DELIVERY_UNITS, BILL_TYPES, DOCUMENT_TYPES,
     MEDICINE_PLACES, ATTENDANCE_MARKS, MAX_MONEY, MAX_PHOTO_BYTES,
-    newId, roundRs, isIntRs, isDateStr, todayStr, daysBetween, fmtRs,
+    newId, roundRs, isIntRs, isDateStr, todayStr, localDateStr, daysBetween, fmtRs,
     isMonthKey, daysInMonth, monthKeyOf,
-    isGharVault, emptyVault, setHousehold, validatePhone, validateEmail,
+    isGharVault, emptyVault, setHousehold, validatePhone, validateEmail, normalizeGmail,
     setHouseholdPhoto, normalizeHousehold,
-    validateStaff, addStaff, findStaff,
-    markAttendance, attendanceCounts, addAdvance, advanceRemaining,
-    staffRemainingAdvance, advanceMonthRecovery, payWorkingForHelper,
+    MIGRATION_OPTIONS, migrationStatusFromVault, markMigrationDismissed, isValidGmailChange,
+    validateStaff, addStaff, findStaff, deleteStaff, updateStaffSalary,
+    markAttendance, attendanceCounts, addAdvance, deleteAdvance, advanceRemaining,
+    staffRemainingAdvance, advanceMonthRecovery, advanceIsDueForMonth,
+    advanceRecoveryPlan, payWorkingForHelper,
     normalizeWorking, fmtDays,
     computeMonthPay, markMonthPaid, staffPayStatement,
     findPaidStaffMonth, isStaffMonthPaid,
     validateDelivery, addDelivery, findDelivery,
     logDelivery, addGasRefill, lastGasRefill, gasDaysSinceLastRefill,
     deliveryMonthTotal, markDeliveryMonthPaid,
-    findPaidDeliveryMonth, isDeliveryMonthPaid,
-    validateUdhaarPerson, addUdhaarPerson, findUdhaarPerson,
+    findPaidDeliveryMonth, isDeliveryMonthPaid, deleteDelivery,
+    validateUdhaarPerson, addUdhaarPerson, deleteUdhaarPerson, findUdhaarPerson,
     validateUdhaarEntry, addUdhaarEntry, udhaarEntryBalance, udhaarPersonBalance,
-    findUdhaarEntry, recordRepayment, forgiveUdhaar, udhaarReminderText,
+    findUdhaarEntry, deleteUdhaarEntry, recordRepayment, forgiveUdhaar, udhaarReminderText,
     validateBill, addBill, findBill, markBillPaid, markBillUnpaid, deleteBill,
     validateDocument, addDocument, findDocument, documentDaysUntil,
     documentReminder, deleteDocument, getChecklist, CHECKLISTS,

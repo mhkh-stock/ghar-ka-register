@@ -1,0 +1,4 @@
+# Ghar ka Register — never commit the recovery file or any local data.
+# data/recovery.key is the spare key for forgot-code recovery: it lives
+# on the user's own PC only (0600), never in the repo, never in a backup.
+data/

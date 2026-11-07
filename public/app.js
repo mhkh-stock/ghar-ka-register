@@ -25,9 +25,27 @@
     pendingDocPhoto: null,
     pendingDeleteDocId: null,
     pendingDeleteMedId: null,
+    pendingDeleteStaffId: null,
+    pendingDeleteAdvanceId: null,
+    pendingDeleteDeliveryId: null,
+    pendingDeleteUdhaarPersonId: null,
+    pendingDeleteUdhaarEntryId: null,
+    docPhotoShrinking: false,
     pendingProfilePhoto: null,
     pendingProfilePhotoRemove: false,
     currentPage: 'home',
+    // P12 login portal.
+    account: null,            // { gmail, verifiedAt, recoveryOn, rkEnvelope } | null
+    session: null,            // { gmail, expiresAt } | null (12 h)
+    portalScreen: null,       // 'setup' | 'unlock' | 'reset' | 'migration' | null
+    pendingRegister: null,    // { gmail, pin, pass } while the OTP step is open
+    pendingMigration: null,   // { gmail } while the migration OTP step is open
+    pendingReset: null,       // { token } after the reset OTP verifies
+    pendingGmailChange: null, // { gmail } while the change-Gmail OTP step is open
+    pendingRecoveryLink: null, // { gmail } while the Security link OTP step is open
+    migrationCreds: null,     // { pin, pass } — current code, memory only, for setup
+    loginGmailCleared: false, // user tapped "Not your Gmail?" on the login screen
+    justReset: false,         // show the reset success message after the next unlock
   };
 
   function $(id) { return document.getElementById(id); }
@@ -77,24 +95,68 @@
     saveEnvelope();
   }
 
+  // ---- P12 portal API (same-origin JSON POSTs; the server is this app) ----
+  async function apiPost(path, body) {
+    var res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    var json = null;
+    try { json = await res.json(); } catch (_e) { json = null; }
+    return { status: res.status, ok: res.ok, json: json || {} };
+  }
+  // true = mail is set up, false = not set up, null = server unreachable.
+  async function mailConfigured() {
+    try {
+      var r = await apiPost('/api/mail/status', {});
+      if (!r.ok) return false;
+      return r.json.configured === true;
+    } catch (_e) { return null; }
+  }
+  // One plain-English line per OTP error code, shared by every OTP step.
+  function otpErrorText(json) {
+    var e = (json && json.error) || '';
+    if (e === 'WRONG') return 'Wrong code — try again.' + (json.triesLeft !== undefined ? ' (' + json.triesLeft + ' tries left)' : '');
+    if (e === 'DEAD') return 'Too many wrong codes. Request a new code and try again.';
+    if (e === 'EXPIRED') return 'That code has expired. Request a new code.';
+    if (e === 'NONE') return 'No code is waiting for this Gmail. Request a new code.';
+    if (e === 'TRY_LATER') return 'A code was just sent — wait a minute, then try again.';
+    if (e === 'COOLDOWN') return 'Too many wrong codes. Wait 15 minutes, then request a new code.';
+    if (e === 'BAD_CODE') return 'Type the 6-digit code from your Gmail.';
+    if (e === 'MAIL_NOT_CONFIGURED') return 'Mail is not set up on this PC yet, so no code can be sent.';
+    if (e === 'RECOVERY_OFF') return 'Forgot-code is off for this book — your code cannot be reset. Restore from a backup instead.';
+    if (e === 'BAD_TOKEN') return 'That code has expired or was already used. Request a new code.';
+    if (e === 'WRONG_PURPOSE') return 'Could not reset the code — try again.';
+    return 'Could not check the code — try again.';
+  }
+  function loadPortalState() {
+    try { state.account = VaultCrypto.loadAccount(); } catch (_e) { state.account = null; }
+    try { state.session = VaultCrypto.loadSession(); } catch (_e) { state.session = null; }
+  }
+
   // ---- screens ----
   function showScreen(which) {
     show($('setup-screen'), which === 'setup');
     show($('unlock-screen'), which === 'unlock');
+    show($('reset-screen'), which === 'reset');
+    show($('migration-screen'), which === 'migration');
     show($('vault-screen'), which === 'vault');
     var pill = $('lock-pill');
     if (pill) {
       pill.textContent = which === 'vault' ? 'Unlocked' : 'Locked';
       pill.classList.toggle('locked', which !== 'vault');
     }
-    if (which === 'unlock') updateLockoutNote();
+    if (which === 'unlock') { fillUnlock(); updateLockoutNote(); }
+    if (which === 'migration') fillMigration();
+    if (which === 'reset') fillReset();
   }
   function updateLockoutNote() {
     var el = $('lockout-note');
     if (!el) return;
     if (VaultCrypto.isLocked(state.lockout, Date.now())) {
       var secs = Math.ceil(VaultCrypto.lockoutRemainingMs(state.lockout, Date.now()) / 1000);
-      el.textContent = 'Too many wrong PINs. Wait ' + secs + ' seconds, then try again.';
+      el.textContent = 'Too many wrong codes. Wait ' + secs + ' seconds, then try again.';
       el.classList.remove('hidden');
     } else {
       el.classList.add('hidden');
@@ -111,7 +173,16 @@
     state.pendingProfilePhotoRemove = false;
     state.pendingDeleteDocId = null;
     state.pendingDeleteMedId = null;
+    state.pendingRegister = null;
+    state.pendingMigration = null;
+    state.pendingGmailChange = null;
+    state.pendingRecoveryLink = null;
+    state.migrationCreds = null;
+    state.loginGmailCleared = false;
+    state.portalScreen = null;
     setText('doc-photo-note', '');
+    var todayNotice = $('today-notice');
+    if (todayNotice) { todayNotice.textContent = ''; todayNotice.classList.add('hidden'); }
     state.lastActiveMs = 0;
     setVal('unlock-pin', '');
     setVal('unlock-pass', '');
@@ -122,28 +193,170 @@
     if (state.key && VaultCrypto.isIdleLocked(state.lastActiveMs, Date.now())) lock();
   }
 
-  // ---- setup (first run: fresh v2 vault, no migration) ----
+  // ---- register (first run: Gmail + code + OTP, then the book opens) ----
+  // The envelope + spare envelope + account record are stored ONLY after
+  // the OTP verifies. If mail is not set up (or sending fails), the book
+  // can still be created without Gmail — no forgot-code later, linkable
+  // later from Security (Phase 4).
+  function setupFormValues() {
+    return {
+      gmail: GharModel.normalizeGmail($('setup-gmail').value || ''),
+      pin: $('setup-pin').value.trim(),
+      pin2: $('setup-pin2').value.trim(),
+      pass: $('setup-pass').value || '',
+    };
+  }
+  function setupFormValid(v, needGmail) {
+    if (needGmail && (!v.gmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v.gmail))) {
+      setText('setup-error', 'Type your Gmail address.');
+      return false;
+    }
+    if (!VaultCrypto.validPin(v.pin)) { setText('setup-error', 'The code must be exactly 6 digits.'); return false; }
+    if (v.pin !== v.pin2) { setText('setup-error', 'The two codes do not match.'); return false; }
+    if (!VaultCrypto.validPassphrase(v.pass)) { setText('setup-error', 'Passphrase must be empty or at least 4 characters.'); return false; }
+    return true;
+  }
+  function clearSetupFields() {
+    setVal('setup-gmail', '');
+    setVal('setup-pin', '');
+    setVal('setup-pin2', '');
+    setVal('setup-pass', '');
+    setVal('setup-otp', '');
+  }
   async function onSetup() {
-    var pin = $('setup-pin').value.trim();
-    var pin2 = $('setup-pin2').value.trim();
-    var pass = $('setup-pass').value || '';
+    var v = setupFormValues();
     setText('setup-error', '');
-    if (!VaultCrypto.validPin(pin)) { setText('setup-error', 'PIN must be exactly 6 digits.'); return; }
-    if (pin !== pin2) { setText('setup-error', 'The two PINs do not match.'); return; }
-    if (!VaultCrypto.validPassphrase(pass)) { setText('setup-error', 'Passphrase must be empty or at least 4 characters.'); return; }
+    setText('setup-mail-error', '');
+    if (!setupFormValid(v, true)) return;
+    var configured;
+    try { configured = await mailConfigured(); }
+    catch (_e) { configured = null; }
+    if (configured === null) {
+      setText('setup-mail-error', 'Could not reach the server — try again.');
+      return;
+    }
+    if (!configured) {
+      // Mail is not set up: plain note + the clearly labelled fallback.
+      show($('setup-mail-note'), true);
+      show($('setup-fallback-btn'), true);
+      setText('setup-mail-error', 'Mail is not set up on this PC yet, so no code can be sent.');
+      return;
+    }
+    state.pendingRegister = { gmail: v.gmail, pin: v.pin, pass: v.pass };
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'register', gmail: v.gmail }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      show($('setup-fallback-btn'), true);
+      setText('setup-mail-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    setText('setup-otp-note', 'We sent a 6-digit code to ' + v.gmail + '. It works for 10 minutes and one time only.');
+    show($('setup-otp-section'), true);
+    show($('setup-btn'), false);
+  }
+  async function onSetupResend() {
+    var pr = state.pendingRegister;
+    if (!pr) return;
+    setText('setup-otp-error', '');
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'register', gmail: pr.gmail }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('setup-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    setText('setup-otp-note', 'We sent a 6-digit code to ' + pr.gmail + '. It works for 10 minutes and one time only.');
+  }
+  function onSetupChangeGmail(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    state.pendingRegister = null;
+    show($('setup-otp-section'), false);
+    show($('setup-btn'), true);
+    setText('setup-otp-error', '');
+    setText('setup-otp-note', '');
+    setVal('setup-otp', '');
+  }
+  async function onSetupVerify() {
+    var pr = state.pendingRegister;
+    if (!pr) return;
+    var code = $('setup-otp').value.trim();
+    setText('setup-otp-error', '');
+    if (!/^\d{6}$/.test(code)) { setText('setup-otp-error', 'Type the 6-digit code from your Gmail.'); return; }
+    var r;
+    try { r = await apiPost('/api/otp/verify', { purpose: 'register', gmail: pr.gmail, code: code }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('setup-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
     try {
       var fresh = GharModel.emptyVault();
-      var made = await VaultCrypto.createVault(pin, pass, fresh);
+      var made = await VaultCrypto.createVault(pr.pin, pr.pass, fresh);
       state.envelope = made.envelope;
       state.key = made.key;
       state.vault = fresh;
       saveEnvelope();
+      // Recovery setup: the server creates the spare key + envelope from
+      // the unlocked vault. If it fails (e.g. a spare key already exists
+      // from another book on this PC), the book still opens — recovery
+      // is simply off, and Security says so (Phase 4).
+      var rkEnvelope = null;
+      var recoveryOn = false;
+      try {
+        var s = await apiPost('/api/recover/setup', {
+          gmail: pr.gmail, envelope: made.envelope, pin: pr.pin, passphrase: pr.pass,
+        });
+        if (s && s.ok && s.json.ok && s.json.rkEnvelope) {
+          rkEnvelope = s.json.rkEnvelope;
+          recoveryOn = true;
+        }
+      } catch (_e) { /* recovery stays off */ }
+      try {
+        VaultCrypto.saveAccount({
+          gmail: pr.gmail, verifiedAt: Date.now(), recoveryOn: recoveryOn, rkEnvelope: rkEnvelope,
+        });
+      } catch (_e) { /* the book still opens without the saved account */ }
+      try { VaultCrypto.saveSession(pr.gmail); } catch (_e) { /* session is optional */ }
+      loadPortalState();
+      state.pendingRegister = null;
+      state.portalScreen = null;
       state.lockout = VaultCrypto.recordSuccess();
       saveLockout();
       state.lastActiveMs = Date.now();
-      setVal('setup-pin', '');
-      setVal('setup-pin2', '');
-      setVal('setup-pass', '');
+      clearSetupFields();
+      show($('setup-otp-section'), false);
+      show($('setup-btn'), true);
+      window.location.hash = '#/home';
+      showScreen('vault');
+      renderAll();
+      route();
+    } catch (e) {
+      setText('setup-otp-error', 'Could not create the book — try again.');
+    }
+  }
+  // "Create without Gmail — no forgot-code later": a PIN-only book, as
+  // today. It can be linked later (migration asks after the next unlock).
+  async function onSetupFallback() {
+    var v = setupFormValues();
+    setText('setup-error', '');
+    setText('setup-mail-error', '');
+    if (!setupFormValid(v, false)) return;
+    try {
+      var fresh = GharModel.emptyVault();
+      var made = await VaultCrypto.createVault(v.pin, v.pass, fresh);
+      state.envelope = made.envelope;
+      state.key = made.key;
+      state.vault = fresh;
+      saveEnvelope();
+      state.pendingRegister = null;
+      state.portalScreen = null;
+      state.lockout = VaultCrypto.recordSuccess();
+      saveLockout();
+      state.lastActiveMs = Date.now();
+      clearSetupFields();
+      show($('setup-fallback-btn'), false);
+      show($('setup-mail-note'), false);
       window.location.hash = '#/home';
       showScreen('vault');
       renderAll();
@@ -153,13 +366,51 @@
     }
   }
 
-  // ---- unlock ----
+  // ---- unlock (login) ----
+  // The saved Gmail is shown, not editable; only the code is typed.
+  // "Not your Gmail?" clears the shown Gmail and asks for Gmail + code —
+  // the typed Gmail must match the book's saved Gmail.
+  function fillUnlock() {
+    loadPortalState();
+    var shown = '';
+    if (state.account && state.account.gmail) shown = state.account.gmail;
+    else if (state.session && state.session.gmail) shown = state.session.gmail;
+    if (shown && !state.loginGmailCleared) {
+      setText('unlock-gmail-addr', shown);
+      show($('unlock-gmail-line'), true);
+      show($('unlock-gmail-input-wrap'), false);
+      show($('not-gmail-link'), true);
+    } else {
+      show($('unlock-gmail-line'), false);
+      show($('unlock-gmail-input-wrap'), true);
+      show($('not-gmail-link'), false);
+      if (shown) setVal('unlock-gmail', shown);
+    }
+  }
+  function onNotGmail(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    state.loginGmailCleared = true;
+    fillUnlock();
+    var input = $('unlock-gmail');
+    if (input && input.focus) input.focus();
+  }
   async function onUnlock() {
     var pin = $('unlock-pin').value.trim();
     var pass = $('unlock-pass').value || '';
     setText('unlock-error', '');
     if (VaultCrypto.isLocked(state.lockout, Date.now())) { updateLockoutNote(); return; }
-    if (!VaultCrypto.validPin(pin)) { setText('unlock-error', 'PIN must be exactly 6 digits.'); return; }
+    if (!VaultCrypto.validPin(pin)) { setText('unlock-error', 'The code must be exactly 6 digits.'); return; }
+    var typedGmail = '';
+    if (state.loginGmailCleared) {
+      typedGmail = GharModel.normalizeGmail($('unlock-gmail').value || '');
+      if (!typedGmail) { setText('unlock-error', 'Type your Gmail.'); return; }
+      loadPortalState();
+      if (state.account && state.account.gmail
+        && GharModel.normalizeGmail(state.account.gmail) !== typedGmail) {
+        setText('unlock-error', 'That Gmail does not match this book.');
+        return;
+      }
+    }
     try {
       var res = await VaultCrypto.unlockVault(pin, pass, state.envelope);
       if (!GharModel.isGharVault(res.vault)) {
@@ -172,27 +423,254 @@
       state.lockout = VaultCrypto.recordSuccess();
       saveLockout();
       state.lastActiveMs = Date.now();
+      var sessionGmail = typedGmail
+        || (state.account && state.account.gmail)
+        || (state.session && state.session.gmail)
+        || '';
+      if (sessionGmail) { try { VaultCrypto.saveSession(sessionGmail); } catch (_e) { /* optional */ } }
+      state.loginGmailCleared = false;
       setVal('unlock-pin', '');
       setVal('unlock-pass', '');
+      // Migration: a PIN-only vault is asked once to link a Gmail.
+      var status = GharModel.migrationStatusFromVault(state.vault, state.account);
+      if (status === 'pending') {
+        state.migrationCreds = { pin: pin, pass: pass };
+        state.portalScreen = 'migration';
+        showScreen('migration');
+        return;
+      }
+      state.portalScreen = null;
       showScreen('vault');
       renderAll();
       route();
+      // After a reset, the first login shows the exact success message
+      // once, on Today — the book is open at that point, so it is true.
+      if (state.justReset) {
+        state.justReset = false;
+        var notice = $('today-notice');
+        if (notice) {
+          notice.textContent = 'Your book is open. Your old code no longer works. Your extra passphrase was removed — you can set a new one in Security.';
+          notice.classList.remove('hidden');
+        }
+      }
     } catch (e) {
       state.lockout = VaultCrypto.recordFailure(state.lockout, Date.now());
       saveLockout();
       if (VaultCrypto.isLocked(state.lockout, Date.now())) {
         updateLockoutNote();
-        setText('unlock-error', 'Wrong PIN. The book is now locked for a while.');
+        setText('unlock-error', 'Wrong code. The book is now locked for a while.');
       } else {
-        setText('unlock-error', 'Wrong PIN — try again. (' + state.lockout.failures
+        setText('unlock-error', 'Wrong code — try again. (' + state.lockout.failures
           + (state.lockout.failures === 1 ? ' wrong try' : ' wrong tries') + ')');
       }
     }
   }
 
+  // ---- migration (link a Gmail to an existing PIN-only vault) ----
+  function fillMigration() {
+    setText('mig-error', '');
+    setVal('mig-gmail', '');
+    setVal('mig-otp', '');
+    show($('mig-otp-section'), false);
+    show($('mig-mail-note'), false);
+    mailConfigured().then(function (c) {
+      // If mail is not set up, the screen says so and offers only Skip.
+      show($('mig-mail-note'), c === false);
+      show($('mig-send-btn'), c !== false);
+    });
+  }
+  async function onMigrationSend() {
+    var gmail = GharModel.normalizeGmail($('mig-gmail').value || '');
+    setText('mig-error', '');
+    if (!gmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gmail)) {
+      setText('mig-error', 'Type your Gmail address.');
+      return;
+    }
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'link', gmail: gmail }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('mig-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    state.pendingMigration = { gmail: gmail };
+    setText('mig-otp-note', 'We sent a 6-digit code to ' + gmail + '. It works for 10 minutes and one time only.');
+    show($('mig-otp-section'), true);
+  }
+  async function onMigrationVerify() {
+    var pm = state.pendingMigration;
+    if (!pm) return;
+    var code = $('mig-otp').value.trim();
+    setText('mig-error', '');
+    if (!/^\d{6}$/.test(code)) { setText('mig-error', 'Type the 6-digit code from your Gmail.'); return; }
+    var r;
+    try { r = await apiPost('/api/otp/verify', { purpose: 'link', gmail: pm.gmail, code: code }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('mig-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    // Link: set up recovery from the unlocked vault (current code +
+    // passphrase, memory only). Book, code, passphrase, data untouched.
+    var creds = state.migrationCreds || { pin: '', pass: '' };
+    var s;
+    try {
+      s = await apiPost('/api/recover/setup', {
+        gmail: pm.gmail, envelope: state.envelope, pin: creds.pin, passphrase: creds.pass,
+      });
+    } catch (_e) { s = null; }
+    if (!s || !s.ok || !s.json.ok || !s.json.rkEnvelope) {
+      setText('mig-error', 'Could not link your Gmail — try again.');
+      return;
+    }
+    try {
+      VaultCrypto.saveAccount({
+        gmail: pm.gmail, verifiedAt: Date.now(), recoveryOn: true, rkEnvelope: s.json.rkEnvelope,
+      });
+    } catch (_e) { /* the book still opens without the saved account */ }
+    try { VaultCrypto.saveSession(pm.gmail); } catch (_e) { /* optional */ }
+    loadPortalState();
+    state.pendingMigration = null;
+    state.migrationCreds = null;
+    state.portalScreen = null;
+    showScreen('vault');
+    renderAll();
+    route();
+  }
+  function onMigrationSkip(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    state.pendingMigration = null;
+    state.migrationCreds = null;
+    state.portalScreen = null;
+    showScreen('vault');
+    renderAll();
+    route();
+  }
+  async function onMigrationDontAsk(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    // "Don't ask again": store the flag in the vault and persist it.
+    state.vault = GharModel.markMigrationDismissed(state.vault);
+    await persist();
+    onMigrationSkip();
+  }
+
+  // ---- forgot-code reset ----
+  // Login → "Forgot your code?" → the SAVED Gmail → Send → OTP step →
+  // the OTP is accepted → new code + confirm → "Set new code and open my book".
+  // On success: new main envelope (new code, passphrase CLEARED), fresh
+  // spare key + spare envelope, lockout cleared (browser side — the
+  // server keeps no lockout record), in-memory key dropped, book locked;
+  // the user logs in with the new code, and Today shows the exact
+  // success message once (see onUnlock + justReset).
+  function fillReset() {
+    loadPortalState();
+    setText('reset-error', '');
+    setText('reset-otp-error', '');
+    setText('reset-new-error', '');
+    setVal('reset-otp', '');
+    setVal('reset-new-pin', '');
+    setVal('reset-new-pin2', '');
+    show($('reset-otp-section'), false);
+    show($('reset-new-section'), false);
+    var gmail = (state.account && state.account.gmail) || '';
+    var recoveryOn = !!(state.account && state.account.recoveryOn && state.account.rkEnvelope);
+    if (!gmail || !recoveryOn) {
+      // Recovery is off (no account, or no spare envelope): plain
+      // message, no Send — the envelope is left untouched.
+      show($('reset-off-note'), true);
+      show($('reset-gmail-line'), false);
+      show($('reset-send-btn'), false);
+    } else {
+      show($('reset-off-note'), false);
+      show($('reset-gmail-line'), true);
+      setText('reset-gmail-addr', gmail);
+      show($('reset-send-btn'), true);
+    }
+  }
+  function onForgot(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    state.portalScreen = 'reset';
+    showScreen('reset');
+  }
+  function onResetBack(ev) {
+    if (ev && ev.preventDefault) ev.preventDefault();
+    state.portalScreen = null;
+    showScreen(state.envelope ? 'unlock' : 'setup');
+  }
+  async function onResetSend() {
+    setText('reset-error', '');
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'reset' }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('reset-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    var gmail = (state.account && state.account.gmail) || '';
+    setText('reset-otp-note', 'We sent a 6-digit code to ' + gmail + '. It works for 10 minutes and one time only.');
+    show($('reset-otp-section'), true);
+  }
+  async function onResetVerify() {
+    var code = $('reset-otp').value.trim();
+    setText('reset-otp-error', '');
+    if (!/^\d{6}$/.test(code)) { setText('reset-otp-error', 'Type the 6-digit code from your Gmail.'); return; }
+    var r;
+    try { r = await apiPost('/api/otp/verify', { purpose: 'reset', code: code }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('reset-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    // A token from the OTP step only — a raw OTP is never accepted (server-side).
+    state.pendingReset = { token: r.json.token };
+    show($('reset-new-section'), true);
+  }
+  async function onResetSubmit() {
+    var pr = state.pendingReset;
+    if (!pr) return;
+    var pin = $('reset-new-pin').value.trim();
+    var pin2 = $('reset-new-pin2').value.trim();
+    setText('reset-new-error', '');
+    if (!VaultCrypto.validPin(pin)) { setText('reset-new-error', 'The new code must be exactly 6 digits.'); return; }
+    if (pin !== pin2) { setText('reset-new-error', 'The two new codes do not match.'); return; }
+    var rkEnvelope = (state.account && state.account.rkEnvelope) || null;
+    if (!rkEnvelope) {
+      setText('reset-new-error', 'Forgot-code is off for this book — your code cannot be reset. Restore from a backup instead.');
+      return;
+    }
+    var r;
+    try {
+      r = await apiPost('/api/recover/reset', { token: pr.token, newPin: pin, rkEnvelope: rkEnvelope });
+    } catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('reset-new-error', r ? otpErrorText(r.json) : 'Could not reset the code — try again.');
+      return;
+    }
+    state.envelope = r.json.envelope;
+    saveEnvelope();
+    try {
+      VaultCrypto.saveAccount({
+        gmail: (state.account && state.account.gmail) || '',
+        verifiedAt: (state.account && state.account.verifiedAt) || Date.now(),
+        recoveryOn: true, rkEnvelope: r.json.rkEnvelope,
+      });
+    } catch (_e) { /* the book still locks; recovery state is best-effort */ }
+    loadPortalState();
+    state.pendingReset = null;
+    state.lockout = VaultCrypto.recordSuccess();
+    saveLockout();
+    try { VaultCrypto.clearSession(); } catch (_e) { /* optional */ }
+    state.justReset = true;
+    lock();
+  }
+
   // ---- routing (no page is reachable while locked) ----
   function route() {
-    if (!state.key) { showScreen(state.envelope ? 'unlock' : 'setup'); return; }
+    // A portal screen in progress (migration after unlock, reset) wins
+    // over the vault screen until it finishes.
+    if (state.portalScreen === 'migration' && state.key) { showScreen('migration'); return; }
+    if (state.portalScreen === 'reset' && !state.key) { showScreen('reset'); return; }
+    if (!state.key) { showScreen(state.portalScreen || (state.envelope ? 'unlock' : 'setup')); return; }
     showScreen('vault');
     var page = Nav.routeForHash(window.location.hash || '#/home');
     state.currentPage = page;
@@ -224,12 +702,19 @@
   }
   function renderStaff() {
     var month = monthInputVal('staff-month');
+    var today = GharModel.todayStr();
     var staff = state.vault.staff || [];
     // Advance form: pick the helper from a dropdown (static ids, so the
     // fake-DOM tests can drive it exactly like the other forms).
     var advSel = $('adv-helper');
     if (advSel) {
       advSel.innerHTML = staff.map(function (s) {
+        return '<option value="' + esc(s.id) + '">' + esc(s.name) + ' — ' + esc(s.role) + '</option>';
+      }).join('');
+    }
+    var salSel = $('salary-helper');
+    if (salSel) {
+      salSel.innerHTML = staff.map(function (s) {
         return '<option value="' + esc(s.id) + '">' + esc(s.name) + ' — ' + esc(s.role) + '</option>';
       }).join('');
     }
@@ -246,6 +731,8 @@
         + '<span class="sub">' + esc(GharModel.fmtRs(s.salaryPkr)) + ' monthly salary · joined ' + esc(s.joinedDate)
         + ' · paid leave ' + esc(String(s.leavePerMonth)) + ' free days/month'
         + (s.phone ? ' · ' + esc(s.phone) : '') + ' · as you entered it</span></div></div>';
+      var staffDelLabel = state.pendingDeleteStaffId === s.id ? 'Tap again to delete' : 'Delete helper';
+      html += '<div class="row"><button type="button" class="small secondary" data-action="staffdel" data-helper="' + esc(s.id) + '">' + staffDelLabel + '</button></div>';
       // Attendance: one tap per day cycles present -> absent -> half ->
       // present. Present is the default, so only exceptions are stored.
       var dim = GharModel.daysInMonth(month);
@@ -259,7 +746,7 @@
         var letter = mark === 'absent' ? 'A' : mark === 'half' ? 'H' : 'P';
         html += '<button type="button" class="small" style="flex:0 0 auto;min-width:44px;min-height:44px"'
           + ' data-action="att" data-helper="' + esc(s.id) + '" data-date="' + esc(dateStr) + '"'
-          + (locked ? ' disabled' : '') + '>' + d + ' · ' + letter + '</button>';
+          + ((locked || dateStr > today) ? ' disabled' : '') + '>' + d + ' · ' + letter + '</button>';
       }
       html += '</div>';
       // Advances: each advance with what is still left to recover.
@@ -279,6 +766,8 @@
             + ' · recovered ' + esc(GharModel.fmtRs(a.recoveredPkr))
             + ' · remaining ' + esc(GharModel.fmtRs(GharModel.advanceRemaining(a)))
             + ' · as you entered it</span></div></div>';
+          var advDelLabel = state.pendingDeleteAdvanceId === a.id ? 'Tap again to delete' : 'Delete advance';
+          html += '<div class="row"><button type="button" class="small secondary" data-action="advdel" data-helper="' + esc(s.id) + '" data-advance="' + esc(a.id) + '">' + advDelLabel + '</button></div>';
         });
       }
       // Month-end pay: the full working, line by line.
@@ -318,6 +807,10 @@
           + '<p class="muted">' + esc(GharModel.fmtRs(working.salaryPkr)) + ' − ' + esc(GharModel.fmtRs(working.absentDeduction))
           + ' − ' + esc(GharModel.fmtRs(working.halfDeduction)) + ' − ' + esc(GharModel.fmtRs(working.advanceRecovery))
           + ' = ' + esc(GharModel.fmtRs(working.netPkr)) + ' · ' + working.daysInMonth + ' days in the month.</p>';
+        if (working.advanceCarriedPkr > 0) {
+          html += '<p class="muted">' + esc(GharModel.fmtRs(working.advanceCarriedPkr))
+            + ' of this advance carries to next month — it was bigger than this month\u2019s pay, so the rest is recovered next month.</p>';
+        }
         if (locked) {
           html += '<p class="muted"><strong>Paid on ' + esc(paid.paidDate) + ' — this month is locked and cannot be edited.</strong></p>'
             + '<div class="row"><button type="button" class="small secondary" data-action="copy" data-helper="' + esc(s.id) + '">Copy statement for WhatsApp</button></div>';
@@ -361,6 +854,8 @@
       var html = '<div class="card"><div class="sum-row"><div class="nm">' + esc(d.name) + ' — ' + esc(d.kind)
         + '<span class="sub">' + esc(GharModel.fmtRs(d.ratePkr)) + ' per ' + esc(d.unit)
         + ' · usual ' + esc(String(d.usualQty)) + ' a day · as you entered it</span></div></div>';
+      var delDelLabel = state.pendingDeleteDeliveryId === d.id ? 'Tap again to delete' : 'Delete delivery';
+      html += '<div class="row"><button type="button" class="small secondary" data-action="deldel" data-delivery="' + esc(d.id) + '">' + delDelLabel + '</button></div>';
       if (d.kind === 'Gas cylinder') {
         var last = GharModel.lastGasRefill(d);
         var since = GharModel.gasDaysSinceLastRefill(d);
@@ -368,7 +863,8 @@
         if (!last) html += '<p class="muted">No refill recorded yet.</p>';
         else {
           html += '<p class="muted">Last refill: ' + esc(last.date) + ' · ' + esc(GharModel.fmtRs(last.pricePkr))
-            + ' · ' + (since === 0 ? 'refilled today' : since + (since === 1 ? ' day ago' : ' days ago')) + '.</p>';
+            + ' · ' + (last.date > GharModel.todayStr() ? 'refill date is in the future'
+              : since === 0 ? 'refilled today' : since + (since === 1 ? ' day ago' : ' days ago')) + '.</p>';
           d.refills.forEach(function (r) {
             html += '<div class="sum-row"><div class="nm">Refill ' + esc(r.date)
               + '<span class="sub">as you entered it</span></div><span class="amt">'
@@ -387,7 +883,8 @@
         html += '<div class="sum-total"><span>Total for ' + esc(month) + '</span><span>'
           + esc(GharModel.fmtRs(total.totalPkr)) + '</span></div>'
           + '<p class="muted">' + total.days + ' days logged · ' + total.skippedDays + ' skipped day'
-          + (total.skippedDays === 1 ? '' : 's') + ' (0 quantity) · each skipped day removes one day\u2019s charge.</p>';
+          + (total.skippedDays === 1 ? '' : 's') + ' (0 quantity) · each skipped day removes one day\u2019s charge · '
+          + (GharModel.daysInMonth(month) - total.days) + ' days not logged yet.</p>';
       }
       if (locked) {
         html += '<p class="muted"><strong>Paid on ' + esc(paid.paidDate) + ' — this month is locked and cannot be edited.</strong></p>';
@@ -408,6 +905,8 @@
         + '<span class="sub">Lent outstanding ' + esc(GharModel.fmtRs(bal.lent))
         + ' · Borrowed outstanding ' + esc(GharModel.fmtRs(bal.borrowed))
         + ' · as you entered it</span></div></div>';
+      var personDelLabel = state.pendingDeleteUdhaarPersonId === p.id ? 'Tap again to delete' : 'Delete person';
+      html += '<div class="row"><button type="button" class="small secondary" data-action="udhpersondel" data-person="' + esc(p.id) + '">' + personDelLabel + '</button></div>';
       if (!p.entries || p.entries.length === 0) {
         html += '<p class="muted">No entries for this person yet.</p>';
       }
@@ -439,7 +938,10 @@
             + ' forgiven — recorded as forgiven, not as a payment.</p>';
         }
         html += '<div class="row"><button type="button" class="small secondary" data-action="reminder" data-person="'
-          + esc(p.id) + '" data-entry="' + esc(e.id) + '">Copy reminder for WhatsApp</button></div>';
+          + esc(p.id) + '" data-entry="' + esc(e.id) + '">Copy reminder for WhatsApp</button>'
+          + '<button type="button" class="small secondary" data-action="udhentrydel" data-person="'
+          + esc(p.id) + '" data-entry="' + esc(e.id) + '">'
+          + (state.pendingDeleteUdhaarEntryId === e.id ? 'Tap again to delete' : 'Delete entry') + '</button></div>';
       });
       html += '</div>';
       return html;
@@ -730,7 +1232,11 @@
       if (hasPhoto) img.src = photo.dataUrl;
       show(img, hasPhoto);
     }
-    if (initials) show(initials, !hasPhoto);
+    if (initials) {
+      var nm = (state.vault && state.vault.householdName) || '';
+      initials.textContent = (nm.trim().charAt(0) || 'V').toUpperCase();
+      show(initials, !hasPhoto);
+    }
   }
   function showPhotoPreview(dataUrl) {
     var preview = $('profile-photo-preview');
@@ -753,6 +1259,12 @@
     if (input) input.value = '';
     setText('profile-photo-note', '');
     showPhotoPreview(hh.photo && hh.photo.dataUrl ? hh.photo.dataUrl : null);
+    // Login Gmail (the portal account — NOT the household contact email
+    // above). Change lives on the Security page.
+    var acct = state.account;
+    show($('profile-login-gmail-line'), !!(acct && acct.gmail));
+    show($('profile-login-gmail-none'), !(acct && acct.gmail));
+    setText('profile-login-gmail', (acct && acct.gmail) || '');
   }
   function renderSidebarName() {
     var name = (state.vault && state.vault.householdName) || 'My Home';
@@ -768,6 +1280,7 @@
     else if (page === 'medicine') renderMedicine();
     else if (page === 'summary') renderSummary();
     else if (page === 'profile') fillProfile();
+    else if (page === 'security') fillSecurity();
   }
   function renderAll() {
     renderSidebarName();
@@ -837,6 +1350,19 @@
       setText('adv-error', (e.errors || [e.message]).join(' '));
     }
   }
+  async function onSalarySave() {
+    setText('salary-error', '');
+    setText('salary-ok', '');
+    try {
+      var s = GharModel.updateStaffSalary(state.vault, $('salary-helper').value, parseInt($('salary-new').value, 10));
+      await persist();
+      renderStaff();
+      setVal('salary-new', '');
+      setText('salary-ok', 'Salary changed for ' + s.name + ': ' + GharModel.fmtRs(s.salaryPkr) + ' a month.');
+    } catch (e) {
+      setText('salary-error', (e.errors || [e.message]).join(' '));
+    }
+  }
   async function onStaffListClick(ev) {
     var b = actionEl(ev);
     if (!b) return;
@@ -868,6 +1394,31 @@
           try { await navigator.clipboard.writeText(statement); } catch (_e) { /* shown on screen instead */ }
         }
         setText('staff-add-ok', 'Statement ready below — copy it to WhatsApp. The app sends nothing itself.');
+      } else if (b.dataset.action === 'staffdel') {
+        if (state.pendingDeleteStaffId !== helper.id) {
+          state.pendingDeleteStaffId = helper.id;
+          renderStaff();
+        } else {
+          state.pendingDeleteStaffId = null;
+          GharModel.deleteStaff(state.vault, helper.id);
+          await persist();
+          renderStaff();
+          renderToday();
+          setText('staff-add-ok', 'Helper deleted: ' + helper.name + '.');
+        }
+      } else if (b.dataset.action === 'advdel') {
+        var adv = (helper.advances || []).find(function (a) { return a.id === b.dataset.advance; });
+        if (!adv) return;
+        if (state.pendingDeleteAdvanceId !== adv.id) {
+          state.pendingDeleteAdvanceId = adv.id;
+          renderStaff();
+        } else {
+          state.pendingDeleteAdvanceId = null;
+          GharModel.deleteAdvance(state.vault, helper.id, adv.id);
+          await persist();
+          renderStaff();
+          setText('staff-add-ok', 'Advance deleted: ' + GharModel.fmtRs(adv.amount) + ' on ' + adv.date + '.');
+        }
       }
     } catch (e) {
       setText('staff-add-error', e.message || 'Could not do that.');
@@ -908,6 +1459,61 @@
       setText('log-error', (e.errors || [e.message]).join(' '));
     }
   }
+  // One-tap fill: log every day that has no log row yet, at the usual
+  // quantity. The whole week is the current week (Monday to Sunday);
+  // the whole month is the shown month. Both stop at today — a future
+  // day is never logged as delivered. Days already logged are left
+  // alone; a locked month refuses before anything is written.
+  async function onLogFill(kind) {
+    setText('log-error', '');
+    setText('log-ok', '');
+    try {
+      var d = GharModel.findDelivery(state.vault, $('log-delivery').value);
+      if (!d) { setText('log-error', 'Add a delivery first — there is nothing to log.'); return; }
+      var month = monthInputVal('del-month');
+      if (GharModel.isDeliveryMonthPaid(d, month)) {
+        setText('log-error', 'That month is already marked paid and cannot be edited.');
+        return;
+      }
+      var today = GharModel.todayStr();
+      var dates = [];
+      if (kind === 'week') {
+        var t = new Date(today + 'T00:00:00Z');
+        var monday = new Date(t);
+        monday.setUTCDate(t.getUTCDate() - ((t.getUTCDay() + 6) % 7));
+        for (var i = 0; i < 7; i++) {
+          var day = new Date(monday);
+          day.setUTCDate(monday.getUTCDate() + i);
+          var ds = day.toISOString().slice(0, 10);
+          if (ds > today) break;
+          if (ds.slice(0, 7) === month) dates.push(ds);
+        }
+      } else {
+        var dim = GharModel.daysInMonth(month);
+        for (var dd = 1; dd <= dim; dd++) {
+          var ds2 = month + '-' + String(dd).padStart(2, '0');
+          if (ds2 > today) break;
+          dates.push(ds2);
+        }
+      }
+      var filled = 0, skipped = 0;
+      for (var k = 0; k < dates.length; k++) {
+        if (d.log && dates[k] in d.log) { skipped++; continue; }
+        GharModel.logDelivery(state.vault, d.id, dates[k], Number(d.usualQty));
+        filled++;
+      }
+      await persist();
+      renderDeliveries();
+      setText('log-ok', filled === 0
+        ? 'Nothing to log — every day up to today already has a log row.'
+        : 'Logged ' + filled + ' day' + (filled === 1 ? '' : 's') + ' at the usual quantity'
+          + (skipped > 0 ? ' (' + skipped + ' already logged, left alone)' : '') + '.');
+    } catch (e) {
+      setText('log-error', (e.errors || [e.message]).join(' '));
+    }
+  }
+  async function onLogWeek() { await onLogFill('week'); }
+  async function onLogMonth() { await onLogFill('month'); }
   async function onRefillAdd() {
     setText('refill-error', '');
     setText('refill-ok', '');
@@ -930,13 +1536,28 @@
   }
   async function onDeliveriesListClick(ev) {
     var b = actionEl(ev);
-    if (!b || b.dataset.action !== 'delpay') return;
+    if (!b) return;
     var month = monthInputVal('del-month');
     try {
-      var rec = GharModel.markDeliveryMonthPaid(state.vault, b.dataset.delivery, month);
-      await persist();
-      renderDeliveries();
-      setText('del-add-ok', 'Marked paid for ' + month + ': ' + GharModel.fmtRs(rec.totalPkr) + '. The month is now locked.');
+      if (b.dataset.action === 'delpay') {
+        var rec = GharModel.markDeliveryMonthPaid(state.vault, b.dataset.delivery, month);
+        await persist();
+        renderDeliveries();
+        setText('del-add-ok', 'Marked paid for ' + month + ': ' + GharModel.fmtRs(rec.totalPkr) + '. The month is now locked.');
+      } else if (b.dataset.action === 'deldel') {
+        var d = GharModel.findDelivery(state.vault, b.dataset.delivery);
+        if (!d) return;
+        if (state.pendingDeleteDeliveryId !== d.id) {
+          state.pendingDeleteDeliveryId = d.id;
+          renderDeliveries();
+        } else {
+          state.pendingDeleteDeliveryId = null;
+          GharModel.deleteDelivery(state.vault, d.id);
+          await persist();
+          renderDeliveries();
+          setText('del-add-ok', 'Delivery deleted: ' + d.name + ' (' + d.kind + ').');
+        }
+      }
     } catch (e) {
       setText('del-add-error', e.message || 'Could not do that.');
     }
@@ -1019,8 +1640,42 @@
   }
   async function onUdhaarListClick(ev) {
     var b = actionEl(ev);
-    if (!b || b.dataset.action !== 'reminder') return;
+    if (!b) return;
     try {
+      if (b.dataset.action === 'udhpersondel') {
+        var personDel = GharModel.findUdhaarPerson(state.vault, b.dataset.person);
+        if (!personDel) return;
+        if (state.pendingDeleteUdhaarPersonId !== personDel.id) {
+          state.pendingDeleteUdhaarPersonId = personDel.id;
+          renderUdhaar();
+        } else {
+          state.pendingDeleteUdhaarPersonId = null;
+          GharModel.deleteUdhaarPerson(state.vault, personDel.id);
+          await persist();
+          renderUdhaar();
+          renderToday();
+          setText('udh-person-ok', 'Person deleted: ' + personDel.person + '.');
+        }
+        return;
+      }
+      if (b.dataset.action === 'udhentrydel') {
+        var personEntry = GharModel.findUdhaarPerson(state.vault, b.dataset.person);
+        var entryDel = personEntry ? GharModel.findUdhaarEntry(personEntry, b.dataset.entry) : null;
+        if (!personEntry || !entryDel) return;
+        if (state.pendingDeleteUdhaarEntryId !== entryDel.id) {
+          state.pendingDeleteUdhaarEntryId = entryDel.id;
+          renderUdhaar();
+        } else {
+          state.pendingDeleteUdhaarEntryId = null;
+          GharModel.deleteUdhaarEntry(state.vault, personEntry.id, entryDel.id);
+          await persist();
+          renderUdhaar();
+          renderToday();
+          setText('udh-entry-ok', 'Entry deleted: ' + entryDel.direction + ' ' + GharModel.fmtRs(entryDel.amountPkr) + ' on ' + entryDel.date + '.');
+        }
+        return;
+      }
+      if (b.dataset.action !== 'reminder') return;
       var person = GharModel.findUdhaarPerson(state.vault, b.dataset.person);
       var entry = person ? GharModel.findUdhaarEntry(person, b.dataset.entry) : null;
       if (!person || !entry) throw new Error('That entry does not exist any more.');
@@ -1194,9 +1849,19 @@
           return;
         }
         setText('doc-photo-note', 'Photo is over 500 KB — shrinking it now…');
-        var shrunk = await downscalePhoto(dataUrl);
-        state.pendingDocPhoto = shrunk;
-        setText('doc-photo-note', 'Photo ready — shrunk to under 500 KB, as you picked it.');
+        // D13: while the photo is shrinking, Add is disabled — submitting
+        // now would save the document without its photo, silently.
+        state.docPhotoShrinking = true;
+        var addBtn = $('doc-add-btn');
+        if (addBtn) addBtn.disabled = true;
+        try {
+          var shrunk = await downscalePhoto(dataUrl);
+          state.pendingDocPhoto = shrunk;
+          setText('doc-photo-note', 'Photo ready — shrunk to under 500 KB, as you picked it.');
+        } finally {
+          state.docPhotoShrinking = false;
+          if (addBtn) addBtn.disabled = false;
+        }
       } catch (e) {
         state.pendingDocPhoto = null;
         setText('doc-add-error', (e && e.message) || 'This photo could not be used — pick another one.');
@@ -1213,6 +1878,9 @@
   // (Phase 5 second pass.)
   function onDocPhotoClear() {
     state.pendingDocPhoto = null;
+    state.docPhotoShrinking = false;
+    var addBtn = $('doc-add-btn');
+    if (addBtn) addBtn.disabled = false;
     var input = $('doc-photo');
     if (input) input.value = '';
     setText('doc-photo-note', '');
@@ -1221,6 +1889,10 @@
   async function onDocumentAdd() {
     setText('doc-add-error', '');
     setText('doc-add-ok', '');
+    if (state.docPhotoShrinking) {
+      setText('doc-add-error', 'The photo is still shrinking — wait a moment, then tap Add document again.');
+      return;
+    }
     try {
       var doc = GharModel.addDocument(state.vault, {
         type: $('doc-type').value,
@@ -1501,6 +2173,297 @@
     }
   }
 
+  // ---- Phase 4: Security page — change login Gmail + recovery on/off ----
+  // Change login Gmail (only while unlocked, recovery on): a code goes
+  // to the NEW Gmail first; the OTP is accepted server-side with a
+  // token (same pattern as the reset), and the server proves the book
+  // with the current spare envelope. The spare key is NOT affected.
+  // The Profile page email is NOT touched.
+  function recoveryOn() {
+    return !!(state.account && state.account.recoveryOn && state.account.rkEnvelope);
+  }
+  function fillSecurity() {
+    loadPortalState();
+    var acct = state.account;
+    var on = recoveryOn();
+    setText('change-gmail-current', (acct && acct.gmail) || '');
+    show($('change-gmail-section'), on);
+    show($('change-gmail-unavailable'), !on);
+    show($('change-gmail-otp-section'), false);
+    setText('change-gmail-error', '');
+    setText('change-gmail-ok', '');
+    setText('change-gmail-otp-error', '');
+    setVal('change-gmail-new', '');
+    setVal('change-gmail-otp', '');
+    if (!acct || !acct.gmail) {
+      setText('recovery-status', 'Forgot-code recovery: off — no Gmail linked yet. Link one below to turn it on.');
+      show($('recovery-gmail-wrap'), true);
+      show($('recovery-on-note'), false);
+      show($('recovery-on-btn'), false);
+      show($('recovery-off-btn'), false);
+    } else if (on) {
+      setText('recovery-status', 'Forgot-code recovery: on — your code can be reset with a code sent to ' + acct.gmail + '.');
+      show($('recovery-gmail-wrap'), false);
+      show($('recovery-on-note'), false);
+      show($('recovery-on-btn'), false);
+      show($('recovery-off-btn'), true);
+    } else {
+      setText('recovery-status', 'Forgot-code recovery: off — your code cannot be reset right now. Your login Gmail is still ' + acct.gmail + '.');
+      show($('recovery-gmail-wrap'), false);
+      show($('recovery-on-note'), true);
+      show($('recovery-on-btn'), true);
+      show($('recovery-off-btn'), false);
+    }
+    show($('recovery-otp-section'), false);
+    setText('recovery-error', '');
+    setText('recovery-ok', '');
+    setText('recovery-otp-error', '');
+    setVal('recovery-gmail', '');
+    setVal('recovery-otp', '');
+    state.pendingGmailChange = null;
+    state.pendingRecoveryLink = null;
+  }
+  function gmailChangeError(v) {
+    if (v === 'NO_GMAIL') return 'Type your Gmail address.';
+    if (v === 'INVALID_GMAIL') return 'Type a Gmail address that looks right.';
+    if (v === 'SAME_GMAIL') return 'That is already your login Gmail.';
+    return '';
+  }
+  async function onChangeGmailSend() {
+    setText('change-gmail-error', '');
+    setText('change-gmail-otp-error', '');
+    setText('change-gmail-ok', '');
+    var next = GharModel.normalizeGmail($('change-gmail-new').value || '');
+    var bad = gmailChangeError(GharModel.isValidGmailChange(next, state.account));
+    if (bad) { setText('change-gmail-error', bad); return; }
+    var configured;
+    try { configured = await mailConfigured(); }
+    catch (_e) { configured = null; }
+    if (configured === null) { setText('change-gmail-error', 'Could not reach the server — try again.'); return; }
+    if (!configured) { setText('change-gmail-error', 'Mail is not set up on this PC yet, so no code can be sent.'); return; }
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'change-gmail', gmail: next }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('change-gmail-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    state.pendingGmailChange = { gmail: next };
+    setText('change-gmail-otp-note', 'We sent a 6-digit code to ' + next + '. It works for 10 minutes and one time only.');
+    show($('change-gmail-otp-section'), true);
+  }
+  async function onChangeGmailVerify() {
+    var pg = state.pendingGmailChange;
+    if (!pg) return;
+    var code = $('change-gmail-otp').value.trim();
+    setText('change-gmail-otp-error', '');
+    if (!/^\d{6}$/.test(code)) { setText('change-gmail-otp-error', 'Type the 6-digit code from your Gmail.'); return; }
+    var r;
+    try { r = await apiPost('/api/otp/verify', { purpose: 'change-gmail', gmail: pg.gmail, code: code }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('change-gmail-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    if (!state.account || !state.account.rkEnvelope) {
+      setText('change-gmail-error', 'Forgot-code is off — link a Gmail first.');
+      return;
+    }
+    var s;
+    try {
+      s = await apiPost('/api/recover/setup', {
+        gmail: pg.gmail, rkEnvelope: state.account.rkEnvelope, token: r.json.token,
+      });
+    } catch (_e) { s = null; }
+    if (!s || !s.ok || !s.json.ok || !s.json.rkEnvelope) {
+      var msg = 'Could not change the Gmail — try again.';
+      if (s && s.status !== 409 && s.json && s.json.error) msg = otpErrorText(s.json);
+      setText('change-gmail-error', msg);
+      return;
+    }
+    var newGmail = pg.gmail;
+    var notified = s.json.notifiedOld === true;
+    try {
+      VaultCrypto.saveAccount({
+        gmail: newGmail, verifiedAt: Date.now(), recoveryOn: true, rkEnvelope: s.json.rkEnvelope,
+      });
+    } catch (_e) { /* the book still opens without the saved account */ }
+    try { VaultCrypto.saveSession(newGmail); } catch (_e) { /* optional */ }
+    loadPortalState();
+    state.pendingGmailChange = null;
+    fillSecurity();
+    setText('change-gmail-ok', 'Login Gmail changed to ' + newGmail + '.'
+      + (notified ? ' Your old Gmail got a note about the change.'
+        : ' The note to your old Gmail could not be sent.'));
+  }
+  async function onChangeGmailResend() {
+    var pg = state.pendingGmailChange;
+    if (!pg) return;
+    setText('change-gmail-otp-error', '');
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'change-gmail', gmail: pg.gmail }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('change-gmail-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    setText('change-gmail-otp-note', 'We sent a 6-digit code to ' + pg.gmail + '. It works for 10 minutes and one time only.');
+  }
+  // Link a Gmail from Security (never linked — the "add it later in
+  // Security" path the migration screen promises). Same shape as the
+  // migration link: a code goes to the Gmail, then setup runs from the
+  // unlocked vault with the current code + passphrase (memory only).
+  async function onRecoverySend() {
+    setText('recovery-error', '');
+    setText('recovery-otp-error', '');
+    setText('recovery-ok', '');
+    var gmail = GharModel.normalizeGmail($('recovery-gmail').value || '');
+    if (!gmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gmail)) {
+      setText('recovery-error', 'Type your Gmail address.');
+      return;
+    }
+    // The code is needed to make the spare key — catch a wrong code
+    // here, before a code is sent.
+    var creds = currentCredentials();
+    if (!VaultCrypto.validPin(creds.pin)) { setText('security-error', 'Current PIN must be exactly 6 digits.'); return; }
+    try {
+      var res = await VaultCrypto.unlockVault(creds.pin, creds.pass, state.envelope);
+      if (!GharModel.isGharVault(res.vault)) throw new Error('not-ghar');
+    } catch (e) {
+      setText('security-error', 'Current PIN (or passphrase) is wrong.');
+      return;
+    }
+    var configured;
+    try { configured = await mailConfigured(); }
+    catch (_e) { configured = null; }
+    if (configured === null) { setText('recovery-error', 'Could not reach the server — try again.'); return; }
+    if (!configured) { setText('recovery-error', 'Mail is not set up on this PC yet, so no code can be sent.'); return; }
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'link', gmail: gmail }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('recovery-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    state.pendingRecoveryLink = { gmail: gmail };
+    setText('recovery-otp-note', 'We sent a 6-digit code to ' + gmail + '. It works for 10 minutes and one time only.');
+    show($('recovery-otp-section'), true);
+  }
+  async function onRecoveryVerify() {
+    var pl = state.pendingRecoveryLink;
+    if (!pl) return;
+    var code = $('recovery-otp').value.trim();
+    setText('recovery-otp-error', '');
+    if (!/^\d{6}$/.test(code)) { setText('recovery-otp-error', 'Type the 6-digit code from your Gmail.'); return; }
+    var r;
+    try { r = await apiPost('/api/otp/verify', { purpose: 'link', gmail: pl.gmail, code: code }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('recovery-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    var creds = currentCredentials();
+    if (!VaultCrypto.validPin(creds.pin)) { setText('security-error', 'Current PIN must be exactly 6 digits.'); return; }
+    var s;
+    try {
+      s = await apiPost('/api/recover/setup', {
+        gmail: pl.gmail, envelope: state.envelope, pin: creds.pin, passphrase: creds.pass,
+      });
+    } catch (_e) { s = null; }
+    if (!s || !s.ok || !s.json.ok || !s.json.rkEnvelope) {
+      setText('recovery-error', s && s.json && s.json.error === 'BAD_CREDENTIALS'
+        ? 'Current PIN (or passphrase) is wrong.'
+        : 'Could not link your Gmail — try again.');
+      return;
+    }
+    try {
+      VaultCrypto.saveAccount({
+        gmail: pl.gmail, verifiedAt: Date.now(), recoveryOn: true, rkEnvelope: s.json.rkEnvelope,
+      });
+    } catch (_e) { /* the book still opens without the saved account */ }
+    try { VaultCrypto.saveSession(pl.gmail); } catch (_e) { /* optional */ }
+    loadPortalState();
+    state.pendingRecoveryLink = null;
+    clearCredentials();
+    fillSecurity();
+    setText('recovery-ok', 'Gmail linked. Forgot-code recovery is on.');
+  }
+  async function onRecoveryResend() {
+    var pl = state.pendingRecoveryLink;
+    if (!pl) return;
+    setText('recovery-otp-error', '');
+    var r;
+    try { r = await apiPost('/api/otp/request', { purpose: 'link', gmail: pl.gmail }); }
+    catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('recovery-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
+      return;
+    }
+    setText('recovery-otp-note', 'We sent a 6-digit code to ' + pl.gmail + '. It works for 10 minutes and one time only.');
+  }
+  async function onRecoveryOn() {
+    setText('recovery-error', '');
+    setText('recovery-ok', '');
+    var acct = state.account;
+    if (!acct || !acct.gmail) return;
+    var creds = currentCredentials();
+    if (!VaultCrypto.validPin(creds.pin)) { setText('security-error', 'Current PIN must be exactly 6 digits.'); return; }
+    var s;
+    try {
+      s = await apiPost('/api/recover/setup', {
+        gmail: acct.gmail, envelope: state.envelope, pin: creds.pin, passphrase: creds.pass,
+      });
+    } catch (_e) { s = null; }
+    if (!s || !s.ok || !s.json.ok || !s.json.rkEnvelope) {
+      setText('recovery-error', s && s.json && s.json.error === 'BAD_CREDENTIALS'
+        ? 'Current PIN (or passphrase) is wrong.'
+        : 'Could not turn recovery on — try again.');
+      return;
+    }
+    try {
+      VaultCrypto.saveAccount({
+        gmail: acct.gmail, verifiedAt: acct.verifiedAt || Date.now(), recoveryOn: true, rkEnvelope: s.json.rkEnvelope,
+      });
+    } catch (_e) { /* the book still opens without the saved account */ }
+    loadPortalState();
+    clearCredentials();
+    fillSecurity();
+    setText('recovery-ok', 'Forgot-code recovery is on again.');
+  }
+  async function onRecoveryOff() {
+    setText('recovery-error', '');
+    setText('recovery-ok', '');
+    // D5: turning recovery off needs the current code, proved by the
+    // server against the book's envelope — the same proof as unlock.
+    var creds = currentCredentials();
+    if (!VaultCrypto.validPin(creds.pin)) {
+      setText('recovery-error', 'Current PIN must be exactly 6 digits.');
+      return;
+    }
+    var r;
+    try {
+      r = await apiPost('/api/recover/off', {
+        pin: creds.pin, passphrase: creds.pass, envelope: state.envelope,
+      });
+    } catch (_e) { r = null; }
+    if (!r || !r.ok || !r.json.ok) {
+      setText('recovery-error', (r && r.json && r.json.error === 'BAD_CREDENTIALS')
+        ? 'Current PIN (or passphrase) is wrong.'
+        : 'Could not turn recovery off — try again.');
+      return;
+    }
+    clearCredentials();
+    try {
+      var acct = state.account || {};
+      VaultCrypto.saveAccount({
+        gmail: acct.gmail, verifiedAt: acct.verifiedAt || Date.now(), recoveryOn: false,
+      });
+    } catch (_e) { /* the book still opens without the saved account */ }
+    loadPortalState();
+    fillSecurity();
+    setText('recovery-ok', 'Forgot-code is now off. If you forget your code, the book cannot be opened.');
+  }
+
   // ---- backup: encrypted export / import ----
   function onExport() {
     setText('backup-error', '');
@@ -1561,6 +2524,13 @@
       GharModel.normalizeHousehold(state.vault);
       state.pendingImport = null;
       saveEnvelope();
+      // D12: the restored book is a different book — the portal account
+      // (login Gmail + spare envelope) belonged to the old one. Clear
+      // it, so Profile stops showing the old Gmail and a later reset
+      // does not try the wrong spare envelope. The book must be linked
+      // again from Security.
+      state.account = null;
+      VaultCrypto.clearAccount();
       state.lockout = VaultCrypto.recordSuccess();
       saveLockout();
       state.lastActiveMs = Date.now();
@@ -1580,25 +2550,49 @@
   // ---- init ----
   function init() {
     loadStored();
+    loadPortalState();
     state.lastActiveMs = Date.now();
     $('setup-btn').addEventListener('click', onSetup);
     $('setup-pin2').addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter') onSetup();
     });
+    $('setup-verify-btn').addEventListener('click', onSetupVerify);
+    $('setup-send-code-btn').addEventListener('click', onSetupResend);
+    $('setup-change-gmail-link').addEventListener('click', onSetupChangeGmail);
+    $('setup-fallback-btn').addEventListener('click', onSetupFallback);
     $('unlock-btn').addEventListener('click', onUnlock);
     $('unlock-pin').addEventListener('keydown', function (ev) {
       if (ev.key === 'Enter') onUnlock();
     });
+    $('not-gmail-link').addEventListener('click', onNotGmail);
+    $('forgot-link').addEventListener('click', onForgot);
+    $('reset-send-btn').addEventListener('click', onResetSend);
+    $('reset-verify-btn').addEventListener('click', onResetVerify);
+    $('reset-btn').addEventListener('click', onResetSubmit);
+    $('reset-back-link').addEventListener('click', onResetBack);
+    // Another tab changed the envelope (reset / PIN change there):
+    // lock this tab immediately. (A tab never fires this for its own
+    // writes, so our own saves cannot lock us out.)
+    window.addEventListener('storage', function (ev) {
+      if (ev && ev.key === LS_VAULT && state.key) lock();
+    });
+    $('mig-send-btn').addEventListener('click', onMigrationSend);
+    $('mig-verify-btn').addEventListener('click', onMigrationVerify);
+    $('mig-skip-link').addEventListener('click', onMigrationSkip);
+    $('mig-dont-ask-link').addEventListener('click', onMigrationDontAsk);
     $('lock-btn').addEventListener('click', lock);
     $('profile-save-btn').addEventListener('click', onProfileSave);
     $('profile-photo').addEventListener('change', onProfilePhotoChange);
     $('profile-photo-remove-btn').addEventListener('click', onProfilePhotoRemove);
     $('staff-add-btn').addEventListener('click', onStaffAdd);
     $('adv-add-btn').addEventListener('click', onAdvanceAdd);
+    $('salary-save-btn').addEventListener('click', onSalarySave);
     $('staff-list').addEventListener('click', onStaffListClick);
     $('staff-month').addEventListener('change', renderStaff);
     $('del-add-btn').addEventListener('click', onDeliveryAdd);
     $('log-btn').addEventListener('click', onLogDay);
+    $('log-week-btn').addEventListener('click', onLogWeek);
+    $('log-month-btn').addEventListener('click', onLogMonth);
     $('refill-btn').addEventListener('click', onRefillAdd);
     $('deliveries-list').addEventListener('click', onDeliveriesListClick);
     $('del-month').addEventListener('change', renderDeliveries);
@@ -1630,6 +2624,14 @@
     $('csv-all-btn').addEventListener('click', function () { onCsvExport('all'); });
     $('change-pin-btn').addEventListener('click', onChangePin);
     $('change-pass-btn').addEventListener('click', onChangePass);
+    $('change-gmail-send-btn').addEventListener('click', onChangeGmailSend);
+    $('change-gmail-verify-btn').addEventListener('click', onChangeGmailVerify);
+    $('change-gmail-resend-btn').addEventListener('click', onChangeGmailResend);
+    $('recovery-send-btn').addEventListener('click', onRecoverySend);
+    $('recovery-verify-btn').addEventListener('click', onRecoveryVerify);
+    $('recovery-resend-btn').addEventListener('click', onRecoveryResend);
+    $('recovery-on-btn').addEventListener('click', onRecoveryOn);
+    $('recovery-off-btn').addEventListener('click', onRecoveryOff);
     $('export-btn').addEventListener('click', onExport);
     $('import-file').addEventListener('change', onImportFileChange);
     $('import-btn').addEventListener('click', onImportRestore);

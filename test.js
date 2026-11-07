@@ -232,10 +232,10 @@ async function main() {
     const b = sectionBody(id) || '';
     return [...b.matchAll(/<h3[^>]*>([^<]*)<\/h3>/g)].map((m) => m[1].trim());
   }
-  check('Layout: Staff sections run form -> list -> action',
-    JSON.stringify(h3s('page-staff')) === JSON.stringify(['Add a helper', 'Helpers', 'Record an advance']), h3s('page-staff'));
-  check('Layout: Security sections run credentials -> change PIN -> change passphrase -> notes',
-    JSON.stringify(h3s('page-security')) === JSON.stringify(['Your current PIN and passphrase', 'Change PIN', 'Change passphrase', 'How your book is protected']), h3s('page-security'));
+  check('Layout: Staff sections run form -> list -> action -> salary fix',
+    JSON.stringify(h3s('page-staff')) === JSON.stringify(['Add a helper', 'Helpers', 'Record an advance', "Change a helper's salary"]), h3s('page-staff'));
+  check('Layout: Security sections run credentials -> change PIN -> change passphrase -> change Gmail -> recovery -> notes',
+    JSON.stringify(h3s('page-security')) === JSON.stringify(['Your current PIN and passphrase', 'Change PIN', 'Change passphrase', 'Change login Gmail', 'Forgot-code recovery', 'How your book is protected']), h3s('page-security'));
   check('Layout: Summary sections run figures -> export',
     JSON.stringify(h3s('page-summary')) === JSON.stringify(["This month's figures", 'Export — CSV']), h3s('page-summary'));
   check('Layout: no duplicate current-PIN/passphrase fields survive on Security',
@@ -520,7 +520,10 @@ async function main() {
   check('Model: Today shows overdue udhaar with the running balance',
     items.some((i) => i.kind === 'udhaar' && i.daysUntil === -1 && i.detail.includes('Rs 15,000') && i.detail.includes('Rs 20,000')), kinds);
   check('Model: Today hides a settled udhaar entry', !items.some((i) => i.kind === 'udhaar' && i.detail.includes('Rs 1,000')));
-  check('Model: Today hides udhaar with no due date', !items.some((i) => i.kind === 'udhaar' && i.detail.includes('Rs 7,000')));
+  check('Model: Today shows udhaar with no due date, one row per person, sorted last',
+    items.some((i) => i.kind === 'udhaar' && i.noDueDate === true && i.detail.includes('Rs 7,000')
+      && i.title.includes('Ahmed') && M.dueLabel(i) === 'no due date')
+    && items[items.length - 1].noDueDate === true, kinds);
   check('Model: Today hides staff pay far from month end (Nov 6, pay due Nov 30)',
     !items.some((i) => i.kind === 'staff'));
   const nearEnd = M.todayItems(vT, '2026-11-25');
@@ -531,8 +534,9 @@ async function main() {
   pmStaff.paidMonths.push({ month: '2026-11', working: {}, netPkr: 15000, paidDate: '2026-11-25' });
   check('Model: Today hides staff pay for a month already marked paid',
     !M.todayItems(paidMonthVault, '2026-11-25').some((i) => i.kind === 'staff'));
-  check('Model: Today is sorted soonest-first',
-    items.every((it, idx) => idx === 0 || items[idx - 1].date <= it.date), items.map((i) => i.date));
+  check('Model: Today is sorted soonest-first, undated udhaar last',
+    items.slice(0, -1).every((it, idx) => idx === 0 || items[idx - 1].date <= it.date)
+    && items[items.length - 1].noDueDate === true, items.map((i) => i.date));
   check('Model: every Today item carries a page link',
     items.every((i) => typeof i.link === 'string' && i.link.startsWith('#/')));
   check('Model: dueLabel overdue singular', M.dueLabel({ daysUntil: -1 }) === 'OVERDUE by 1 day');
@@ -669,18 +673,34 @@ async function main() {
     htmlSrc.includes('An old Card Vault backup does not open here'));
   check('R1: the page labels every record "as you entered it"',
     htmlSrc.includes('as you entered it') && appSrc.includes('as you entered it'));
-  check('R1: the page states the honest limits (nothing fetched, no reminders closed, no recovery)',
+  check('R1: the page states the honest limits (nothing fetched, no reminders closed, spare-key limit)',
     htmlSrc.includes('Nothing is fetched, checked or looked up')
     && htmlSrc.includes('There are no reminders when the app is closed')
-    && htmlSrc.includes('No recovery, by design'));
-  // R2: no live data — no network calls from the app.
-  check('R2: app.js makes no network calls (no fetch / XHR / WebSocket)',
-    !/fetch\s*\(|XMLHttpRequest|WebSocket/.test(appSrc));
+    && htmlSrc.includes('If the spare key file is deleted, forgot-code recovery stops working — the book still opens with your code'));
+  // R2: no live data — the app calls ONLY its own server (same-origin
+  // POSTs to /api/* for the login portal). No outside URL, no XHR,
+  // no WebSocket, no live data of any kind.
+  check('R2: app.js only calls its own server (same-origin /api/, no XHR/WebSocket, no outside URL)',
+    !/XMLHttpRequest|WebSocket/.test(appSrc)
+    && !/fetch\s*\(\s*['"`]https?:/.test(appSrc)
+    && !/['"`]https?:\/\/[^'"` ]+['"`]/.test(appSrc)
+    && appSrc.includes('fetch(path,'));
   check('R2: app.js never reads SMS', !/sms/i.test(appSrc) && !/sms/i.test(htmlSrc));
-  // The server stores nothing: no POST/PUT/DELETE routes, no database.
+  // P12 portal: the server gained POST routes, but ONLY the portal API
+  // (mail status, OTP, recovery) — no PUT/DELETE/PATCH routes, and every
+  // POST route is behind the same-origin check.
   const serverSrc = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
-  check('Review: server has no write routes (GET only)', !/req\.method === '(POST|PUT|DELETE|PATCH)'/.test(serverSrc));
-  check('Review: server has no database', !/sqlite|DatabaseSync|fs\.writeFile/.test(serverSrc));
+  check('Review: server write routes are only the P12 portal API (POST, same-origin)',
+    !/req\.method === '(PUT|DELETE|PATCH)'/.test(serverSrc)
+    && ['/api/mail/status', '/api/otp/request', '/api/otp/verify',
+      '/api/recover/setup', '/api/recover/reset', '/api/recover/off'].every((p) => serverSrc.includes("'" + p + "'"))
+    && serverSrc.includes('originAllowed(req)'));
+  check('Review: server binds localhost only, never 0.0.0.0 (D5)',
+    serverSrc.includes("server.listen(PORT, '127.0.0.1'") && !serverSrc.includes('0.0.0.0'));
+  check('Review: server has no database (only the two P12 files, never served)',
+    !/sqlite|DatabaseSync/.test(serverSrc)
+    && serverSrc.includes('RECOVERY_KEY_FILE') && serverSrc.includes('ACCOUNT_FILE')
+    && serverSrc.includes('data/ is never served'));
   check('Review: server log line + title name the new app',
     serverSrc.includes('Ghar ka Register listening') && serverSrc.startsWith('// Ghar ka Register'));
   check('Review: server.js keeps the old app name out',
@@ -929,19 +949,21 @@ async function main() {
         w.proratedDays === 1 && w.salaryPkr === 500, w);
     }
     // A joiner with absences deducts from the prorated salary.
+    // (October dates: the D4 rule refuses attendance in the future,
+    // so these cases use a month that is fully past.)
     {
-      const { v, s } = mk(15000, 2, '2026-11-16');
-      mark(v, s, ['2026-11-20', '2026-11-21'], 'absent');
-      const w = M.computeMonthPay(v, s.id, '2026-11');
-      check('Phase 2 (proration + leave): joined 16 Nov, 2 absent, leave 2 — both free, net Rs 7,500',
-        w.salaryPkr === 7500 && w.freeDaysUsed === 2 && w.netPkr === 7500, w);
+      const { v, s } = mk(15000, 2, '2026-10-16');
+      mark(v, s, ['2026-10-20', '2026-10-21'], 'absent');
+      const w = M.computeMonthPay(v, s.id, '2026-10');
+      check('Phase 2 (proration + leave): joined 16 Oct, 2 absent, leave 2 — both free, net Rs 8,000',
+        w.salaryPkr === 8000 && w.freeDaysUsed === 2 && w.netPkr === 8000, w);
     }
     {
-      const { v, s } = mk(15000, 2, '2026-11-16');
-      mark(v, s, ['2026-11-20', '2026-11-21', '2026-11-22'], 'absent');
-      const w = M.computeMonthPay(v, s.id, '2026-11');
-      check('Phase 2 (proration + leave): joined 16 Nov, 3 absent, leave 2 — 1 charged, net Rs 7,000',
-        w.salaryPkr === 7500 && w.chargedAbsentDays === 1 && w.absentDeduction === 500 && w.netPkr === 7000, w);
+      const { v, s } = mk(15000, 2, '2026-10-16');
+      mark(v, s, ['2026-10-20', '2026-10-21', '2026-10-22'], 'absent');
+      const w = M.computeMonthPay(v, s.id, '2026-10');
+      check('Phase 2 (proration + leave): joined 16 Oct, 3 absent, leave 2 — 1 charged, net Rs 7,500',
+        w.salaryPkr === 8000 && w.chargedAbsentDays === 1 && w.absentDeduction === 500 && w.netPkr === 7500, w);
     }
     // A month before the join date pays nothing — the helper was not here.
     {
@@ -1016,9 +1038,8 @@ async function main() {
       && M.staffPayStatement(s, '2026-11').includes('Paid on 2026-11-30')
       && M.staffPayStatement(s, '2026-11').includes('Paid leave used: 1 day — Rs 0')
       && M.staffPayStatement(s, '2026-11').includes('Absent days: 0 x Rs 500 = Rs 0'));
-    check('Phase 2: the next month is still open after a lock',
-      M.computeMonthPay(v, s.id, '2026-12').netPkr === 15000
-      && M.markAttendance(v, s.id, '2026-12-01', 'absent').mark === 'absent');
+    check('Phase 2: the next month is still open after a lock (pay maths only — marking a December day refuses while today is in November, see D4)',
+      M.computeMonthPay(v, s.id, '2026-12').netPkr === 15000);
     check('Phase 2: markMonthPaid rejects a bad paid date',
       throwsCode(() => M.markMonthPaid(v, s.id, '2026-12', 'tomorrow'), 'VALIDATION'));
   }
@@ -1291,6 +1312,20 @@ async function main() {
       // anything — both send the user to a human.
       'Check with the office; rules change.',
       'do not use — check with a pharmacist',
+      // P12 portal: "verify"/"check"/"fetch" here are about the OTP code
+      // and the app's own server — never about a household record. The
+      // OTP is verified, the Gmail is checked, the code is fetched from
+      // the user's own inbox via the app's own /api/* endpoints.
+      'We will send a 6-digit code to your Gmail to check it is yours.',
+      'Verify code',
+      'Could not check the code — try again.',
+      '/api/otp/verify',
+      'fetch(path, {',
+      'setup-verify-btn',
+      'mig-verify-btn',
+      'reset-verify-btn',
+      'change-gmail-verify-btn',
+      'recovery-verify-btn',
     ];
     let scanned = [htmlSrc, appSrc, modelSrc].join('\n');
     for (const d of DENIALS) scanned = scanned.split(d).join('');
@@ -1516,9 +1551,9 @@ async function main() {
   }
 
   // ---- §8. The app shell in a minimal fake DOM (vm) ----
-  // Proves the real flow end to end: setup -> empty Today -> lock ->
-  // wrong PINs -> lockout -> unlock -> profile save -> change PIN ->
-  // export -> auto-lock -> no page reachable while locked.
+  // Proves the real flow end to end: register (Gmail + OTP) -> empty
+  // Today -> lock -> wrong codes -> lockout -> unlock -> profile save ->
+  // change PIN -> export -> auto-lock -> no page reachable while locked.
   const RealDate = Date;
   class El {
     constructor(id) {
@@ -1556,7 +1591,11 @@ async function main() {
     const intervals = [];
     const winListeners = {};
     const blobs = [];
-    let fakeNow = 1780000000000; // fixed clock the test controls
+    const fetchCalls = [];
+    let mailConfigured = true;
+    let portalPin = '123456';
+    let setupCount = 0;
+    let fakeNow = 1779969600000; // 2026-05-28T12:00:00Z: MIDDAY UTC so the fake local date is May 28 in every timezone (the old 20:26Z instant was May 29 in PKT and broke 13 date-relative UI checks under TZ=Asia/Karachi)
     class FakeDate extends RealDate {
       constructor(...a) { super(...(a.length ? a : [fakeNow])); }
       static now() { return fakeNow; }
@@ -1571,8 +1610,56 @@ async function main() {
       Date: FakeDate,
       Blob: class { constructor(parts) { this.parts = parts; blobs.push(this); } },
       URL: { createObjectURL: () => 'blob:test', revokeObjectURL: () => {} },
+      // Mocked portal API (fetch boundary): the suite never needs a real
+      // server. Mail is "configured" by default; the OTP code the fake
+      // "sends" is always '123456'. The fake reset does REAL crypto: it
+      // decrypts the stored envelope with the known current code
+      // (portalPin, set by the test) and re-encrypts under the new code,
+      // so the data survives the reset. Passphrase is '' in the fake.
+      fetch: async (url, opts) => {
+        const u = String(url);
+        const body = opts && opts.body ? JSON.parse(opts.body) : {};
+        fetchCalls.push({ url: u, body });
+        const ok = (status, json) => ({ ok: status >= 200 && status < 300, status, json: async () => json });
+        if (u.endsWith('/api/mail/status')) return ok(200, { configured: mailConfigured });
+        if (u.endsWith('/api/otp/request')) {
+          if (!mailConfigured) return ok(503, { ok: false, error: 'MAIL_NOT_CONFIGURED' });
+          if (body.purpose === 'reset' && !store.has(V.ACCOUNT_KEY)) return ok(200, { ok: false, error: 'RECOVERY_OFF' });
+          return ok(200, { ok: true });
+        }
+        if (u.endsWith('/api/otp/verify')) {
+          if (body.code === '123456') return ok(200, { ok: true, token: 'tok-' + (body.purpose || 'x') });
+          return ok(200, { ok: false, error: 'WRONG', triesLeft: 4 });
+        }
+        if (u.endsWith('/api/recover/setup')) {
+          // Gmail change (Phase 4): the caller sends the current spare
+          // envelope + a token; the server returns the SAME envelope
+          // and records whether the old Gmail was notified.
+          if (body.rkEnvelope) {
+            return ok(200, { ok: true, rkEnvelope: body.rkEnvelope, notifiedOld: true });
+          }
+          setupCount += 1;
+          const tag = setupCount === 1 ? 'fake-rk-envelope' : 'fake-rk-envelope-' + setupCount;
+          return ok(200, { ok: true, rkEnvelope: { v: 1, kdf: 'pbkdf2-sha256', iter: 600000, data: tag } });
+        }
+        if (u.endsWith('/api/recover/reset')) {
+          const raw = store.get('ghar-register-vault');
+          const env = JSON.parse(raw);
+          const res = await V.unlockVault(portalPin, '', env);
+          const made = await V.createVault(body.newPin, '', res.vault);
+          return ok(200, { ok: true, envelope: made.envelope, rkEnvelope: { v: 1, kdf: 'pbkdf2-sha256', iter: 600000, data: 'fake-rk-new' } });
+        }
+        if (u.endsWith('/api/recover/off')) return ok(200, { ok: true });
+        return ok(404, { ok: false, error: 'NOT_FOUND' });
+      },
+      _fetchCalls: fetchCalls,
+      _setMailConfigured: (b) => { mailConfigured = b; },
+      _setPortalPin: (p) => { portalPin = p; },
       FileReader: class {
-        readAsText() {}
+        readAsText(file) {
+          this.result = (file && file._text) || '';
+          if (typeof this.onload === 'function') this.onload();
+        }
         readAsDataURL(file) {
           this.result = (file && file._dataUrl) || '';
           if (typeof this.onload === 'function') this.onload();
@@ -1614,14 +1701,20 @@ async function main() {
   check('Shell: first run shows the setup screen, vault hidden',
     isVisible('setup-screen') && isHidden('unlock-screen') && isHidden('vault-screen')
     && el('lock-pill').textContent === 'Locked');
-  // Setup with mismatched PINs is refused.
+  // Setup with mismatched codes is refused (Gmail filled, so the check
+  // reaches the code match, not the Gmail check).
+  el('setup-gmail').value = 'test@example.com';
   el('setup-pin').value = '123456'; el('setup-pin2').value = '123457'; el('setup-pass').value = '';
   el('setup-btn').click();
   await sleep(50);
-  check('Shell: mismatched PINs are refused on setup',
+  check('Shell: mismatched codes are refused on setup',
     el('setup-error').textContent.includes('do not match') && isVisible('setup-screen'));
   el('setup-pin').value = '123456'; el('setup-pin2').value = '123456';
   el('setup-btn').click();
+  check('Shell: Create my book sends a code and shows the OTP step',
+    await waitFor(() => isVisible('setup-otp-section') && el('setup-otp-note').textContent.includes('test@example.com')));
+  el('setup-otp').value = '123456';
+  el('setup-verify-btn').click();
   check('Shell: setup creates the book and lands on an empty Today page',
     await waitFor(() => isVisible('vault-screen') && isVisible('today-empty') && el('today-list').innerHTML === ''
       && el('lock-pill').textContent === 'Unlocked'),
@@ -1629,6 +1722,15 @@ async function main() {
   check('Shell: the envelope is stored (new localStorage key, not the old vault key)',
     ctx._store.get('ghar-register-vault') !== undefined && ctx._store.get('ghar-register-vault') !== null
     && ctx._store.get('pcv.vault') === undefined);
+  check('Shell: the account is saved after registration (Gmail + recovery on)',
+    await (async () => {
+      const raw = ctx._store.get('ghar-register-account');
+      if (!raw) return false;
+      const acct = JSON.parse(raw);
+      return acct.gmail === 'test@example.com' && acct.recoveryOn === true
+        && acct.rkEnvelope && acct.rkEnvelope.data === 'fake-rk-envelope'
+        && typeof acct.verifiedAt === 'number';
+    })());
   check('Shell: section pages render their empty states',
     ['staff', 'deliveries', 'udhaar', 'bills', 'documents', 'medicine', 'summary']
       .every((p) => isVisible(p + '-empty')));
@@ -1730,7 +1832,7 @@ async function main() {
   check('Shell: removing the passphrase works off the same single credentials',
     await waitFor(() => el('change-pass-ok').textContent.includes('Passphrase removed')));
   // Wrong credentials fail once, in one place, and change nothing.
-  el('security-pin').value = '000000'; el('security-pass').value = '';
+  el('security-pin').value = '999999'; el('security-pass').value = '';
   el('change-pin-new').value = '111111'; el('change-pin-new2').value = '111111';
   el('change-pin-btn').click();
   check('Shell: wrong current PIN fails once with one error and changes nothing',
@@ -1742,30 +1844,30 @@ async function main() {
     isVisible('unlock-screen') && isHidden('vault-screen'));
   el('unlock-pin').value = '654321';
   el('unlock-btn').click();
-  check('Shell: unlock with the new PIN reopens the book',
+  check('Shell: unlock with the new code reopens the book',
     await waitFor(() => isVisible('vault-screen')));
-  // Wrong PINs: 4 tries warn, the 5th locks for 30s.
+  // Wrong codes: 4 tries warn, the 5th locks for 30s.
   el('lock-btn').click();
   for (let i = 0; i < 4; i++) {
-    el('unlock-pin').value = '000000';
+    el('unlock-pin').value = '999999';
     el('unlock-btn').click();
-    await waitFor(() => el('unlock-error').textContent.includes('Wrong PIN'));
+    await waitFor(() => el('unlock-error').textContent.includes('Wrong code'));
     el('unlock-error').textContent = '';
   }
-  check('Shell: 4 wrong PINs warn but do not lock yet', isHidden('lockout-note'));
-  el('unlock-pin').value = '000000';
+  check('Shell: 4 wrong codes warn but do not lock yet', isHidden('lockout-note'));
+  el('unlock-pin').value = '999999';
   el('unlock-btn').click();
-  check('Shell: the 5th wrong PIN locks the book (30s note shows)',
+  check('Shell: the 5th wrong code locks the book (30s note shows)',
     await waitFor(() => !isHidden('lockout-note') && el('lockout-note').textContent.includes('30 seconds')));
   el('unlock-pin').value = '654321';
   el('unlock-btn').click();
   await sleep(100);
-  check('Shell: the right PIN is refused while the lockout runs',
+  check('Shell: the right code is refused while the lockout runs',
     isVisible('unlock-screen') && isHidden('vault-screen'));
   ctx._advanceMs(31000);
   el('unlock-pin').value = '654321';
   el('unlock-btn').click();
-  check('Shell: after the 30s wait the right PIN opens the book again',
+  check('Shell: after the 30s wait the right code opens the book again',
     await waitFor(() => isVisible('vault-screen')));
   // Backup export (Blob captured by the stub).
   ctx.location.hash = '#/backup';
@@ -1820,12 +1922,12 @@ async function main() {
   // Staff: open the page, set the month, add a helper through the form.
   ctx.location.hash = '#/staff';
   ctx._dispatchWin('hashchange');
-  el('staff-month').value = '2026-11';
+  el('staff-month').value = '2026-05';
   el('staff-month').dispatch('change');
   el('staff-name').value = 'Ayesha';
   el('staff-role').value = 'maid';
   el('staff-salary').value = '15000';
-  el('staff-joined').value = '2026-11-01';
+  el('staff-joined').value = '2026-05-01';
   el('staff-leave').value = '2';
   el('staff-phone').value = '03001234567';
   el('staff-add-btn').click();
@@ -1839,27 +1941,26 @@ async function main() {
   // Attendance: tap days 1, 2, 3 -> absent; tap day 3 again -> half, again -> present.
   const tapAtt = (date) => el('staff-list').dispatch('click',
     { target: { dataset: { action: 'att', helper: helperId, date }, parentElement: null } });
-  tapAtt('2026-11-01'); tapAtt('2026-11-02'); tapAtt('2026-11-03');
+  tapAtt('2026-05-01'); tapAtt('2026-05-02'); tapAtt('2026-05-03');
   await sleep(50);
   check('Phase 2 UI: tapping attendance days marks them absent (working updates)',
     staffHtml().includes('1 · A') && staffHtml().includes('2 · A') && staffHtml().includes('3 · A')
     && staffHtml().includes('Absent: 3'));
-  tapAtt('2026-11-03');
-  await sleep(50);
+  tapAtt('2026-05-03');
   check('Phase 2 UI: tapping an absent day again cycles it to half day',
-    staffHtml().includes('3 · H') && staffHtml().includes('Half: 1'));
-  tapAtt('2026-11-03');
+    await waitFor(() => staffHtml().includes('3 · H') && staffHtml().includes('Half: 1')));
+  tapAtt('2026-05-03');
   await sleep(50);
   check('Phase 2 UI: tapping a half day again cycles it back to present',
     staffHtml().includes('3 · P') && staffHtml().includes('Half: 0'));
-  tapAtt('2026-11-03');
+  tapAtt('2026-05-03');
   await sleep(50);
   check('Phase 2 UI: tapping a present day again cycles it back to absent',
     staffHtml().includes('3 · A') && staffHtml().includes('Absent: 3'));
   // Advance: Rs 2,000 full recovery through the advance form.
   el('adv-helper').value = helperId;
   el('adv-amount').value = '2000';
-  el('adv-date').value = '2026-11-05';
+  el('adv-date').value = '2026-05-05';
   el('adv-note').value = 'for medicine';
   el('adv-recovery').value = 'full';
   el('adv-add-btn').click();
@@ -1883,14 +1984,14 @@ async function main() {
   check('Phase 2 UI: Mark paid locks the month and shows the stored working',
     await waitFor(() => staffHtml().includes('Paid on') && staffHtml().includes('locked and cannot be edited')
       && staffHtml().includes('Rs 12,500')));
-  tapAtt('2026-11-10');
+  tapAtt('2026-05-10');
   await sleep(50);
   check('Phase 2 UI: tapping attendance on a locked month is refused with an error',
     el('staff-add-error').textContent.includes('already marked paid'));
   // Deliveries: add the doodhwala through the form, log days, mark paid.
   ctx.location.hash = '#/deliveries';
   ctx._dispatchWin('hashchange');
-  el('del-month').value = '2026-11';
+  el('del-month').value = '2026-05';
   el('del-month').dispatch('change');
   el('del-name').value = 'Doodhwala';
   el('del-kind').value = 'Doodhwala';
@@ -1912,11 +2013,11 @@ async function main() {
     el('log-btn').click();
     await sleep(50);
   };
-  await logDay('2026-11-01', 0);
-  await logDay('2026-11-02', 0);
-  await logDay('2026-11-03', 1);
+  await logDay('2026-05-01', 0);
+  await logDay('2026-05-02', 0);
+  await logDay('2026-05-03', 1);
   check('Phase 2 UI: logging a skipped day says so, and the bill shows the working',
-    el('log-ok').textContent.includes('Logged 1 on 2026-11-03')
+    el('log-ok').textContent.includes('Logged 1 on 2026-05-03')
     && delHtml().includes('2 skipped days') && delHtml().includes('Rs 220'));
   // Gas: add a cylinder delivery, record a refill, days-since shows.
   el('del-name').value = 'Gas';
@@ -1942,7 +2043,7 @@ async function main() {
     { target: { dataset: { action: 'delpay', delivery: delId }, parentElement: null } });
   check('Phase 2 UI: Mark paid locks the delivery month',
     await waitFor(() => delHtml().includes('Paid on') && delHtml().includes('locked and cannot be edited')));
-  await logDay('2026-11-04', 1);
+  await logDay('2026-05-04', 1);
   check('Phase 2 UI: logging into a locked delivery month is refused with an error',
     el('log-error').textContent.includes('already marked paid'));
 
@@ -2430,8 +2531,10 @@ async function main() {
       V.BACKUP_APP_LABELS.includes('ghar-ka-register') && V.BACKUP_APP_LABELS.includes('personal-card-vault'));
   }
   // ---- §10b. Phase 5 UI wiring (Summary + CSV) in the fake DOM ----
-  // The shell vault already holds Ayesha (paid Nov, net Rs 12,500), the
-  // doodhwala (Nov total Rs 220, paid) and a gas delivery with a refill.
+  // The shell vault already holds Ayesha (paid May, net Rs 12,500), the
+  // doodhwala (May total Rs 220, paid) and a gas delivery with a refill.
+  // (May, not November: the fake clock is 2026-05-28, and the D4 rule
+  // refuses attendance in the future, so the Phase 2 UI flow logs May.)
   const phase5Ids = ['summary-month', 'summary-list', 'summary-empty',
     'csv-staff-btn', 'csv-deliveries-btn', 'csv-udhaar-btn', 'csv-bills-btn',
     'csv-documents-btn', 'csv-medicines-btn', 'csv-all-btn',
@@ -2443,7 +2546,7 @@ async function main() {
     !htmlSrc.includes('next build phase'));
   ctx.location.hash = '#/summary';
   ctx._dispatchWin('hashchange');
-  el('summary-month').value = '2026-11';
+  el('summary-month').value = '2026-05';
   el('summary-month').dispatch('change');
   check('Phase 5 UI: the Summary page shows the paid staff total (Rs 12,500) + deliveries (Rs 220) + last-month comparison',
     el('summary-list').innerHTML.includes('Rs 12,500')
@@ -2523,8 +2626,8 @@ async function main() {
     }
     check('Smoke: vendor paths outside the OCR engine are not served', (await req('GET', '/vendor/tesseract/other.js')).status === 404);
     const home = await req('GET', '/');
-    check('Smoke: homepage names Ghar ka Register + no-recovery warning',
-      home.raw.includes('Ghar ka Register') && home.raw.includes('No recovery, by design'));
+    check('Smoke: homepage names Ghar ka Register + spare-key trade-off',
+      home.raw.includes('Ghar ka Register') && home.raw.includes('If someone can open the files on your PC, they can find the spare key'));
     check('Smoke: homepage shows the empty-Today state',
       home.raw.includes('Nothing due — add your first helper, bill or document.'));
     check('Smoke: homepage loads the six Phase-1 scripts and no removed ones',
@@ -2538,9 +2641,1628 @@ async function main() {
       EXPECTED_PAGES.every((p) => home.raw.includes('id="page-' + p + '"')));
     check('Smoke: unknown page -> 404', (await req('GET', '/nope.html')).status === 404);
     check('Smoke: server log names Ghar ka Register',
-      serverOut.includes('Ghar ka Register listening on :' + TEST_PORT), serverOut.trim());
+      serverOut.includes('Ghar ka Register listening on 127.0.0.1:' + TEST_PORT), serverOut.trim());
   } finally {
     server.kill();
+  }
+
+  // ---- §10. P12 Phase 1 — mail + OTP + recovery endpoints (server only) ----
+  // Fixtures use obviously fake addresses (test@example.com etc.) and
+  // never a real Gmail. No test ever sends real mail.
+  const Otp = require('./server/otp.js');
+  const Mail = require('./server/mail.js');
+  const netMod = require('node:net');
+  const spawn2 = require('node:child_process').spawn;
+  const outboxFile = '/tmp/p12-test-outbox-' + process.pid + '.jsonl';
+  try { fs.unlinkSync(outboxFile); } catch (_e) { /* fresh */ }
+  const PORTAL_PORT = 3039;
+  const PORTAL_BASE = 'http://127.0.0.1:' + PORTAL_PORT;
+  const UNCONF_PORT = 3041;
+  const UNCONF_BASE = 'http://127.0.0.1:' + UNCONF_PORT;
+  function postJson(base, p, body, extraHeaders) {
+    return new Promise((resolve, reject) => {
+      const data = body === undefined ? '' : JSON.stringify(body);
+      const r = require('node:http').request(base + p, {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) }, extraHeaders || {}),
+      }, (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => {
+          let json = null;
+          try { json = JSON.parse(raw); } catch (_e) { /* not JSON */ }
+          resolve({ status: res.statusCode, raw, json });
+        });
+      });
+      r.on('error', reject);
+      r.end(data);
+    });
+  }
+  function getRaw(base, p) {
+    return new Promise((resolve, reject) => {
+      const r = require('node:http').request(base + p, { method: 'GET' }, (res) => {
+        let raw = '';
+        res.on('data', (c) => { raw += c; });
+        res.on('end', () => resolve({ status: res.statusCode, raw }));
+      });
+      r.on('error', reject);
+      r.end();
+    });
+  }
+  function outboxMails() {
+    try {
+      return fs.readFileSync(outboxFile, 'utf8').trim().split('\n')
+        .filter(Boolean).map((l) => JSON.parse(l));
+    } catch (_e) { return []; }
+  }
+  function outboxCodeFor(gmail) {
+    const mails = outboxMails().filter((m) => m.to === gmail);
+    if (!mails.length) return null;
+    const m = /(\d{6})/.exec(mails[mails.length - 1].text || '');
+    return m ? m[1] : null;
+  }
+  // Fake SMTP server (plain, no TLS): records the transcript and answers
+  // the protocol. `advertiseStartTls` / `authFail` switch its behaviour.
+  function startFakeSmtp(opts) {
+    const o = opts || {};
+    const transcript = [];
+    const server = netMod.createServer((sock) => {
+      sock.write('220 fake.test ESMTP\r\n');
+      let buf = '';
+      let inData = false;
+      sock.on('data', (chunk) => {
+        buf += chunk.toString('utf8');
+        let idx;
+        while ((idx = buf.indexOf('\r\n')) >= 0) {
+          const line = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          transcript.push(line);
+          if (inData) {
+            if (line === '.') { inData = false; sock.write('250 OK queued\r\n'); }
+            continue;
+          }
+          const up = line.toUpperCase();
+          if (up.startsWith('EHLO')) {
+            sock.write(o.advertiseStartTls ? '250-localhost\r\n250 STARTTLS\r\n' : '250 Hello\r\n');
+          } else if (up === 'STARTTLS') {
+            sock.write('220 Go ahead\r\n');
+          } else if (up === 'AUTH LOGIN') {
+            sock.write('334 VXNlcm5hbWU6\r\n');
+          } else if (line === Buffer.from('test@example.com').toString('base64')) {
+            sock.write('334 UGFzc3dvcmQ6\r\n');
+          } else if (line === Buffer.from('fake-pass').toString('base64')) {
+            sock.write(o.authFail ? '535 Bad credentials\r\n' : '235 OK\r\n');
+          } else if (up.startsWith('MAIL FROM')) sock.write('250 OK\r\n');
+          else if (up.startsWith('RCPT TO')) sock.write('250 OK\r\n');
+          else if (up === 'DATA') { inData = true; sock.write('354 End data\r\n'); }
+          else if (up === 'QUIT') sock.write('221 Bye\r\n');
+          else sock.write('250 OK\r\n');
+        }
+      });
+    });
+    return new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port, transcript }));
+    });
+  }
+  function startBadGreetingSmtp() {
+    const server = netMod.createServer((sock) => {
+      sock.write('500 Nope\r\n');
+      sock.end();
+    });
+    return new Promise((resolve) => {
+      server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
+    });
+  }
+
+  // ---- §10a. OTP store (pure functions) ----
+  {
+    const t0 = 1779969600000; // same midday-UTC instant as the fake clock above
+    const store = Otp.createOtpStore();
+    check('P12 OTP: normalizeGmail trims + lower-cases',
+      Otp.normalizeGmail('  Test@Example.COM ') === 'test@example.com');
+    const issued = Otp.issueOtp(store, 'register', 'test@example.com', t0);
+    check('P12 OTP: issue returns a 6-digit code', issued.ok === true && /^\d{6}$/.test(issued.code));
+    // No plaintext code anywhere in the store (scan every string field).
+    const seen = [];
+    (function scan(v) {
+      if (typeof v === 'string') seen.push(v);
+      else if (v && typeof v === 'object') {
+        if (v instanceof Map) { v.forEach((x) => scan(x)); }
+        else Object.values(v).forEach(scan);
+      }
+    })(store);
+    check('P12 OTP: the plaintext code is stored nowhere (hash only)',
+      seen.indexOf(issued.code) < 0);
+    const bad = Otp.verifyOtp(store, 'register', 'test@example.com', '12345', t0 + 1000);
+    check('P12 OTP: malformed code is refused without burning a try',
+      bad.ok === false && bad.error === 'BAD_CODE'
+      && Otp.verifyOtp(store, 'register', 'test@example.com', issued.code, t0 + 2000).ok === true);
+    const store2 = Otp.createOtpStore();
+    const i2 = Otp.issueOtp(store2, 'register', 'test@example.com', t0);
+    const vWrong = Otp.verifyOtp(store2, 'register', 'test@example.com', i2.code === '123456' ? '123457' : '123456', t0 + 1000);
+    check('P12 OTP: one wrong try leaves 4 tries',
+      vWrong.ok === false && vWrong.error === 'WRONG' && vWrong.triesLeft === 4);
+    const vOk = Otp.verifyOtp(store2, 'register', 'test@example.com', i2.code, t0 + 2000);
+    check('P12 OTP: the right code verifies and returns a token',
+      vOk.ok === true && typeof vOk.token === 'string' && /^[0-9a-f]{64}$/.test(vOk.token));
+    check('P12 OTP: a consumed OTP cannot verify again',
+      Otp.verifyOtp(store2, 'register', 'test@example.com', i2.code, t0 + 3000).error === 'NONE');
+    check('P12 OTP: token consumes once and returns the Gmail',
+      Otp.consumeToken(store2, vOk.token, 'register', t0 + 4000).gmail === 'test@example.com'
+      && Otp.consumeToken(store2, vOk.token, 'register', t0 + 5000).error === 'BAD_TOKEN');
+    const store3 = Otp.createOtpStore();
+    const i3 = Otp.issueOtp(store3, 'reset', 'test@example.com', t0);
+    check('P12 OTP: token is purpose-bound (reset token refuses register)',
+      await (async () => {
+        const v3 = Otp.verifyOtp(store3, 'reset', 'test@example.com', i3.code, t0 + 1000);
+        return v3.ok === true
+          && Otp.consumeToken(store3, v3.token, 'register', t0 + 2000).error === 'WRONG_PURPOSE';
+      })());
+    const store4 = Otp.createOtpStore();
+    const i4 = Otp.issueOtp(store4, 'register', 'test@example.com', t0);
+    check('P12 OTP: expired OTP is refused',
+      Otp.verifyOtp(store4, 'register', 'test@example.com', i4.code, t0 + 11 * 60 * 1000).error === 'EXPIRED');
+    const store5 = Otp.createOtpStore();
+    const i5 = Otp.issueOtp(store5, 'register', 'test@example.com', t0);
+    const wrong = i5.code === '123456' ? '123457' : '123456';
+    for (let k = 0; k < 4; k++) Otp.verifyOtp(store5, 'register', 'test@example.com', wrong, t0 + 1000 + k);
+    check('P12 OTP: 5th wrong try kills the OTP',
+      Otp.verifyOtp(store5, 'register', 'test@example.com', wrong, t0 + 2000).error === 'DEAD');
+    check('P12 OTP: after death, new requests are in cooldown',
+      Otp.issueOtp(store5, 'register', 'test@example.com', t0 + 3000).error === 'COOLDOWN');
+    check('P12 OTP: after the cooldown, a new OTP can be requested',
+      Otp.issueOtp(store5, 'register', 'test@example.com', t0 + 16 * 60 * 1000).ok === true);
+    const store6 = Otp.createOtpStore();
+    const g6 = 'limit@example.com';
+    Otp.issueOtp(store6, 'register', g6, t0);
+    Otp.noteOtpSent(store6, g6, t0);
+    check('P12 OTP: a second request within 60s is refused',
+      Otp.issueOtp(store6, 'register', g6, t0 + 30000).error === 'TRY_LATER');
+    Otp.issueOtp(store6, 'register', g6, t0 + 61000);
+    Otp.noteOtpSent(store6, g6, t0 + 61000);
+    Otp.issueOtp(store6, 'register', g6, t0 + 122000);
+    Otp.noteOtpSent(store6, g6, t0 + 122000);
+    check('P12 OTP: a 4th OTP in one hour is refused',
+      Otp.issueOtp(store6, 'register', g6, t0 + 183000).error === 'TRY_LATER');
+    const store7 = Otp.createOtpStore();
+    const i7 = Otp.issueOtp(store7, 'register', 'test@example.com', t0);
+    Otp.revokeOtp(store7, 'register', 'test@example.com');
+    check('P12 OTP: revoking after a mail failure leaves no OTP',
+      Otp.verifyOtp(store7, 'register', 'test@example.com', i7.code, t0 + 1000).error === 'NONE');
+    const store8 = Otp.createOtpStore();
+    const i8 = Otp.issueOtp(store8, 'register', 'test@example.com', t0);
+    const v8 = Otp.verifyOtp(store8, 'register', 'test@example.com', i8.code, t0 + 1000);
+    check('P12 OTP: token expires after 5 minutes',
+      Otp.consumeToken(store8, v8.token, 'register', t0 + 6 * 60 * 1000).error === 'EXPIRED');
+  }
+
+  // ---- §10b. SMTP client against a local fake server ----
+  {
+    const fake = await startFakeSmtp({ advertiseStartTls: false });
+    try {
+      const sent = await Mail.smtpSend({
+        host: '127.0.0.1', port: fake.port, user: 'test@example.com', pass: 'fake-pass',
+        to: 'test@example.com', subject: 'Hi', text: 'Hello there', requireStartTls: false,
+      });
+      check('P12 SMTP: full conversation succeeds against the fake server', sent.ok === true);
+      check('P12 SMTP: transcript has AUTH + MAIL FROM + RCPT TO + DATA + subject',
+        fake.transcript.some((l) => l === 'AUTH LOGIN')
+        && fake.transcript.some((l) => l.startsWith('MAIL FROM:<test@example.com>'))
+        && fake.transcript.some((l) => l.startsWith('RCPT TO:<test@example.com>'))
+        && fake.transcript.some((l) => l === 'Subject: Hi'));
+    } finally { fake.server.close(); }
+    const fakeTls = await startFakeSmtp({ advertiseStartTls: false });
+    try {
+      check('P12 SMTP: a server without STARTTLS is refused when it is required',
+        await (async () => {
+          try {
+            await Mail.smtpSend({
+              host: '127.0.0.1', port: fakeTls.port, user: 'test@example.com', pass: 'fake-pass',
+              to: 'test@example.com', subject: 'Hi', text: 'Hello', requireStartTls: true,
+            });
+            return false;
+          } catch (e) { return e && e.code === 'NO_STARTTLS'; }
+        })());
+    } finally { fakeTls.server.close(); }
+    const fakeAuth = await startFakeSmtp({ advertiseStartTls: false, authFail: true });
+    try {
+      check('P12 SMTP: a refused app password fails with AUTH_FAILED',
+        await (async () => {
+          try {
+            await Mail.smtpSend({
+              host: '127.0.0.1', port: fakeAuth.port, user: 'test@example.com', pass: 'fake-pass',
+              to: 'test@example.com', subject: 'Hi', text: 'Hello', requireStartTls: false,
+            });
+            return false;
+          } catch (e) { return e && e.code === 'AUTH_FAILED'; }
+        })());
+    } finally { fakeAuth.server.close(); }
+    const badGreet = await startBadGreetingSmtp();
+    try {
+      check('P12 SMTP: a bad greeting fails closed',
+        await (async () => {
+          try {
+            await Mail.smtpSend({
+              host: '127.0.0.1', port: badGreet.port, user: 'test@example.com', pass: 'fake-pass',
+              to: 'test@example.com', subject: 'Hi', text: 'Hello', requireStartTls: false,
+            });
+            return false;
+          } catch (e) { return !!e && e.code === 'SMTP_PROTOCOL'; }
+        })());
+    } finally { badGreet.server.close(); }
+    check('P12 SMTP: missing credentials fail closed (MAIL_NOT_CONFIGURED)',
+      await (async () => {
+        const u = process.env.GMAIL_USER;
+        const p = process.env.GMAIL_APP_PASSWORD;
+        delete process.env.GMAIL_USER;
+        delete process.env.GMAIL_APP_PASSWORD;
+        try {
+          await Mail.smtpSend({ to: 'test@example.com', subject: 'Hi', text: 'Hello' });
+          return false;
+        } catch (e) { return e && e.code === 'MAIL_NOT_CONFIGURED'; }
+        finally {
+          if (u !== undefined) process.env.GMAIL_USER = u;
+          if (p !== undefined) process.env.GMAIL_APP_PASSWORD = p;
+        }
+      })());
+    const seen = [];
+    const rec = { send: async (m) => { seen.push(m); return { ok: true }; } };
+    await Mail.sendMail('test@example.com', 'Subj', 'Body', rec);
+    check('P12 SMTP: injected transport replaces SMTP (no socket)',
+      seen.length === 1 && seen[0].to === 'test@example.com' && seen[0].subject === 'Subj');
+    check('P12 mail: isMailConfigured is false without env vars',
+      await (async () => {
+        const u = process.env.GMAIL_USER;
+        const p = process.env.GMAIL_APP_PASSWORD;
+        delete process.env.GMAIL_USER;
+        delete process.env.GMAIL_APP_PASSWORD;
+        const r = Mail.isMailConfigured() === false;
+        if (u !== undefined) process.env.GMAIL_USER = u;
+        if (p !== undefined) process.env.GMAIL_APP_PASSWORD = p;
+        return r;
+      })());
+  }
+
+  // ---- §10c. Spare-envelope helpers (vault.js) ----
+  {
+    const k1 = V.randomSpareKey();
+    const k2 = V.randomSpareKey();
+    check('P12 spare: a spare key is 32 random bytes',
+      k1 instanceof Uint8Array && k1.length === 32
+      && Buffer.from(k1).toString('hex') !== Buffer.from(k2).toString('hex'));
+    const sk = await V.importSpareKey(k1);
+    const rkEnv = await V.createSpareEnvelope(sk, SAMPLE);
+    check('P12 spare: spare envelope round-trips the vault object',
+      JSON.stringify(await V.openSpareEnvelope(sk, rkEnv)) === JSON.stringify(SAMPLE));
+    const sk2 = await V.importSpareKey(k2);
+    check('P12 spare: a different spare key cannot open the envelope',
+      await throwsCodeAsync(() => V.openSpareEnvelope(sk2, rkEnv), 'DECRYPT_FAILED'));
+    check('P12 spare: importing a short key is refused',
+      await throwsCodeAsync(() => V.importSpareKey(new Uint8Array(16)), 'BAD_SPARE_KEY'));
+    check('P12 spare: importing a non-bytes key is refused',
+      await throwsCodeAsync(() => V.importSpareKey('not-bytes'), 'BAD_SPARE_KEY'));
+  }
+
+  // ---- §10d. Server endpoints (spawned servers) ----
+  const portalServer = spawn2('node', ['server.js'], {
+    cwd: __dirname,
+    env: {
+      ...process.env, PORT: String(PORTAL_PORT),
+      GMAIL_USER: 'test@example.com', GMAIL_APP_PASSWORD: 'fake-pass',
+      GMAIL_FAKE_OUTBOX: outboxFile,
+    },
+  });
+  let portalOut = '';
+  portalServer.stdout.on('data', (d) => { portalOut += d; });
+  portalServer.stderr.on('data', (d) => { portalOut += d; });
+  const unconfServer = spawn2('node', ['server.js'], {
+    cwd: __dirname,
+    env: { ...process.env, PORT: String(UNCONF_PORT), GMAIL_USER: '', GMAIL_APP_PASSWORD: '' },
+  });
+  let unconfOut = '';
+  unconfServer.stdout.on('data', (d) => { unconfOut += d; });
+  unconfServer.stderr.on('data', (d) => { unconfOut += d; });
+  try {
+    let up1 = false;
+    for (let i = 0; i < 20 && !up1; i++) {
+      try { await getRaw(PORTAL_BASE, '/health'); up1 = true; } catch (_e) { await sleep(200); }
+    }
+    let up2 = false;
+    for (let i = 0; i < 20 && !up2; i++) {
+      try { await getRaw(UNCONF_BASE, '/health'); up2 = true; } catch (_e) { await sleep(200); }
+    }
+    check('P12 server: portal server comes up', up1);
+    check('P12 server: unconfigured server comes up', up2);
+    check('P12 server: /api/mail/status says configured with env vars',
+      (await postJson(PORTAL_BASE, '/api/mail/status', {})).json.configured === true);
+    check('P12 server: /api/mail/status says not configured without env vars',
+      (await postJson(UNCONF_BASE, '/api/mail/status', {})).json.configured === false);
+    check('P12 server: OTP request without mail configured is 503',
+      (await postJson(UNCONF_BASE, '/api/otp/request', { purpose: 'register', gmail: 'test@example.com' })).status === 503);
+    check('P12 server: book routes still work without mail configured',
+      (await getRaw(UNCONF_BASE, '/health')).status === 200
+      && (await getRaw(UNCONF_BASE, '/')).status === 200);
+    check('P12 server: foreign Origin is refused on the API',
+      (await postJson(PORTAL_BASE, '/api/mail/status', {}, { Origin: 'https://evil.example' })).status === 403);
+    check('P12 server: bad purpose is refused (400)',
+      (await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'nope', gmail: 'test@example.com' })).status === 400);
+    check('P12 server: bad Gmail is refused (400)',
+      (await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'register', gmail: 'not-an-email' })).status === 400);
+    check('P12 server: bad JSON body is refused (400)',
+      await (async () => {
+        const r = await new Promise((resolve, reject) => {
+          const req2 = require('node:http').request(PORTAL_BASE + '/api/otp/request', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+          }, (res) => {
+            let raw = '';
+            res.on('data', (c) => { raw += c; });
+            res.on('end', () => resolve({ status: res.statusCode }));
+          });
+          req2.on('error', reject);
+          req2.end('{not json');
+        });
+        return r.status === 400;
+      })());
+    // OTP request + verify through HTTP, mail captured in the outbox file.
+    const gA = 'otp-a@example.com';
+    const rqA = await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'register', gmail: gA });
+    check('P12 server: OTP request answers ok and a mail is captured',
+      rqA.json && rqA.json.ok === true && outboxCodeFor(gA) !== null);
+    const codeA = outboxCodeFor(gA);
+    check('P12 server: the captured mail goes to the right Gmail, no code in the subject',
+      outboxMails().some((m) => m.to === gA && !/^\d{6}$/.test(m.subject) && !m.subject.includes(codeA)));
+    const vWrong = await postJson(PORTAL_BASE, '/api/otp/verify', { purpose: 'register', gmail: gA, code: codeA === '123456' ? '123457' : '123456' });
+    check('P12 server: a wrong OTP is refused with tries left',
+      vWrong.json && vWrong.json.ok === false && vWrong.json.error === 'WRONG' && vWrong.json.triesLeft === 4);
+    const vOk = await postJson(PORTAL_BASE, '/api/otp/verify', { purpose: 'register', gmail: gA, code: codeA });
+    check('P12 server: the right OTP verifies and returns a token',
+      vOk.json && vOk.json.ok === true && typeof vOk.json.token === 'string');
+    check('P12 server: the same OTP cannot verify twice',
+      (await postJson(PORTAL_BASE, '/api/otp/verify', { purpose: 'register', gmail: gA, code: codeA })).json.error === 'NONE');
+    // Recovery setup + reset end to end through HTTP.
+    const made = await V.createVault('123456', '', SAMPLE);
+    const setup = await postJson(PORTAL_BASE, '/api/recover/setup', {
+      gmail: 'otp-setup@example.com', envelope: made.envelope, pin: '123456', passphrase: '',
+    });
+    check('P12 server: recovery setup returns a spare envelope',
+      setup.json && setup.json.ok === true && setup.json.rkEnvelope && typeof setup.json.rkEnvelope.data === 'string');
+    const keyFile = path.join(__dirname, 'data', 'recovery.key');
+    const acctFile = path.join(__dirname, 'data', 'account.json');
+    check('P12 server: setup writes a 32-byte spare key file',
+      fs.existsSync(keyFile) && fs.readFileSync(keyFile).length === 32);
+    check('P12 server: setup writes the account binding',
+      JSON.parse(fs.readFileSync(acctFile, 'utf8')).gmail === 'otp-setup@example.com');
+    const oldKeyBytes = fs.readFileSync(keyFile);
+    check('P12 server: a second setup is refused (409 ALREADY_SET)',
+      (await postJson(PORTAL_BASE, '/api/recover/setup', {
+        gmail: 'otp-setup@example.com', envelope: made.envelope, pin: '123456', passphrase: '',
+      })).status === 409);
+    check('P12 server: setup with a wrong PIN is refused',
+      await (async () => {
+        // Temporarily remove the key file so the ALREADY_SET guard does
+        // not mask the credentials check, then put it back.
+        fs.unlinkSync(keyFile);
+        const r = await postJson(PORTAL_BASE, '/api/recover/setup', {
+          gmail: 'otp-setup@example.com', envelope: made.envelope, pin: '123457', passphrase: '',
+        });
+        fs.writeFileSync(keyFile, oldKeyBytes, { mode: 0o600 });
+        return r.status === 400 && r.json.error === 'BAD_CREDENTIALS';
+      })());
+    // D5: recovery off needs the current code, verified against the
+    // book's envelope. No credentials, a wrong code, or another book's
+    // envelope all refuse — and the key file stays in every case.
+    check('P12 server: recovery off without credentials is refused and the key file stays',
+      await (async () => {
+        const r = await postJson(PORTAL_BASE, '/api/recover/off', {});
+        return r.status === 400 && r.json.error === 'BAD_CREDENTIALS' && fs.existsSync(keyFile);
+      })());
+    check('P12 server: recovery off with a wrong PIN is refused and the key file stays',
+      await (async () => {
+        const r = await postJson(PORTAL_BASE, '/api/recover/off', {
+          pin: '123457', passphrase: '', envelope: made.envelope,
+        });
+        return r.status === 400 && r.json.error === 'BAD_CREDENTIALS' && fs.existsSync(keyFile);
+      })());
+    check('P12 server: recovery off with another book\u2019s envelope is refused and the key file stays',
+      await (async () => {
+        const other = await V.createVault('654321', '', SAMPLE);
+        const r = await postJson(PORTAL_BASE, '/api/recover/off', {
+          pin: '123456', passphrase: '', envelope: other.envelope,
+        });
+        return r.status === 400 && r.json.error === 'BAD_CREDENTIALS' && fs.existsSync(keyFile);
+      })());
+    // Reset: OTP to the BOUND Gmail — a freely typed address is ignored.
+    const rqR = await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'reset', gmail: 'attacker@example.com' });
+    check('P12 server: reset OTP request answers ok (body Gmail ignored)',
+      rqR.json && rqR.json.ok === true);
+    check('P12 server: the reset mail went to the BOUND Gmail only',
+      outboxCodeFor('otp-setup@example.com') !== null
+      && outboxMails().filter((m) => m.to === 'attacker@example.com').length === 0);
+    const codeR = outboxCodeFor('otp-setup@example.com');
+    const vR = await postJson(PORTAL_BASE, '/api/otp/verify', { purpose: 'reset', code: codeR });
+    check('P12 server: reset OTP verifies to a token',
+      vR.json && vR.json.ok === true && typeof vR.json.token === 'string');
+    check('P12 server: reset with a bad new code is refused and the token stays valid',
+      await (async () => {
+        // validPin is checked BEFORE the token is consumed, so a bad
+        // code leaves the token usable for the real reset below.
+        const r = await postJson(PORTAL_BASE, '/api/recover/reset', {
+          token: vR.json.token, newPin: '12345', rkEnvelope: setup.json.rkEnvelope,
+        });
+        return r.status === 400 && r.json.error === 'BAD_PIN';
+      })());
+    // Reset fails closed when the spare key file is gone — and the token
+    // survives the failure (the key-file check runs before consuming it).
+    check('P12 server: reset fails closed without the spare key file',
+      await (async () => {
+        const off = await postJson(PORTAL_BASE, '/api/recover/off', {
+          pin: '123456', passphrase: '', envelope: made.envelope,
+        });
+        if (!off.json || !off.json.ok) return false;
+        const r = await postJson(PORTAL_BASE, '/api/recover/reset', {
+          token: vR.json.token, newPin: '654321', rkEnvelope: setup.json.rkEnvelope,
+        });
+        return r.json && r.json.error === 'RECOVERY_OFF';
+      })());
+    // Set recovery up again (same book, same code) and reset with the
+    // SAME token — it was not consumed by the failed reset.
+    const setup2 = await postJson(PORTAL_BASE, '/api/recover/setup', {
+      gmail: 'otp-setup@example.com', envelope: made.envelope, pin: '123456', passphrase: '',
+    });
+    check('P12 server: recovery can be set up again after being turned off',
+      setup2.json && setup2.json.ok === true && setup2.json.rkEnvelope);
+    const reset = await postJson(PORTAL_BASE, '/api/recover/reset', {
+      token: vR.json.token, newPin: '654321', rkEnvelope: setup2.json.rkEnvelope,
+    });
+    check('P12 server: reset returns a new envelope + fresh spare envelope',
+      reset.json && reset.json.ok === true && reset.json.envelope && reset.json.rkEnvelope
+      && reset.json.envelope.data !== made.envelope.data
+      && reset.json.rkEnvelope.data !== setup2.json.rkEnvelope.data);
+    check('P12 server: the new envelope opens with the new code, empty passphrase',
+      await (async () => {
+        const u = await V.unlockVault('654321', '', reset.json.envelope);
+        return JSON.stringify(u.vault) === JSON.stringify(SAMPLE);
+      })());
+    check('P12 server: the old code no longer opens the new envelope',
+      await throwsCodeAsync(() => V.unlockVault('123456', '', reset.json.envelope), 'DECRYPT_FAILED'));
+    const newKeyBytes = fs.readFileSync(keyFile);
+    check('P12 server: the spare key rotated on reset',
+      Buffer.from(newKeyBytes).toString('hex') !== Buffer.from(oldKeyBytes).toString('hex'));
+    check('P12 server: the OLD spare envelope does not open the new vault',
+      await (async () => {
+        const oldSk = await V.importSpareKey(oldKeyBytes);
+        try { await V.openSpareEnvelope(oldSk, reset.json.rkEnvelope); return false; }
+        catch (e) { return e && e.code === 'DECRYPT_FAILED'; }
+      })());
+    check('P12 server: the NEW spare envelope opens the vault with the new key',
+      await (async () => {
+        const newSk = await V.importSpareKey(newKeyBytes);
+        const v = await V.openSpareEnvelope(newSk, reset.json.rkEnvelope);
+        return JSON.stringify(v) === JSON.stringify(SAMPLE);
+      })());
+    check('P12 server: the same reset token cannot be used twice',
+      (await postJson(PORTAL_BASE, '/api/recover/reset', {
+        token: vR.json.token, newPin: '111222', rkEnvelope: reset.json.rkEnvelope,
+      })).json.error === 'BAD_TOKEN');
+    check('P12 server: a raw OTP is never accepted as a reset token',
+      (await postJson(PORTAL_BASE, '/api/recover/reset', {
+        token: codeR, newPin: '111222', rkEnvelope: reset.json.rkEnvelope,
+      })).json.error === 'BAD_TOKEN');
+    check('P12 server: a token for the WRONG purpose cannot reset',
+      await (async () => {
+        const rq3 = await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'register', gmail: 'otp-z@example.com' });
+        if (!rq3.json || !rq3.json.ok) return false;
+        const c3 = outboxCodeFor('otp-z@example.com');
+        const v3 = await postJson(PORTAL_BASE, '/api/otp/verify', { purpose: 'register', gmail: 'otp-z@example.com', code: c3 });
+        const r = await postJson(PORTAL_BASE, '/api/recover/reset', {
+          token: v3.json.token, newPin: '654321', rkEnvelope: reset.json.rkEnvelope,
+        });
+        return r.json && r.json.error === 'WRONG_PURPOSE';
+      })());
+    // Gmail change (Phase 4): same book, new Gmail — the spare key and
+    // spare envelope are NOT affected; the old Gmail gets a plain note.
+    const gNew = 'otp-changed@example.com';
+    const rqC = await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'change-gmail', gmail: gNew });
+    check('P12 server: change-Gmail OTP request answers ok and a mail is captured',
+      rqC.json && rqC.json.ok === true && outboxCodeFor(gNew) !== null);
+    const codeC = outboxCodeFor(gNew);
+    const vC = await postJson(PORTAL_BASE, '/api/otp/verify', { purpose: 'change-gmail', gmail: gNew, code: codeC });
+    check('P12 server: change-Gmail OTP verifies to a token',
+      vC.json && vC.json.ok === true && typeof vC.json.token === 'string');
+    const change = await postJson(PORTAL_BASE, '/api/recover/setup', {
+      gmail: gNew, rkEnvelope: reset.json.rkEnvelope, token: vC.json.token,
+    });
+    check('P12 server: Gmail change returns the SAME spare envelope + notifiedOld',
+      change.json && change.json.ok === true
+      && JSON.stringify(change.json.rkEnvelope) === JSON.stringify(reset.json.rkEnvelope)
+      && change.json.notifiedOld === true);
+    check('P12 server: Gmail change updates the account binding',
+      JSON.parse(fs.readFileSync(acctFile, 'utf8')).gmail === gNew);
+    check('P12 server: Gmail change notifies the OLD Gmail with a plain note, no code in it',
+      await (async () => {
+        const notes = outboxMails().filter((m) => m.to === 'otp-setup@example.com'
+          && (m.subject || '').includes('login Gmail changed'));
+        if (!notes.length) return false;
+        const n = notes[notes.length - 1];
+        return (n.text || '').includes(gNew) && !/\b\d{6}\b/.test(n.text || '') && !/\b\d{6}\b/.test(n.subject || '');
+      })());
+    check('P12 server: Gmail change does NOT rotate the spare key file',
+      Buffer.from(fs.readFileSync(keyFile)).toString('hex') === Buffer.from(newKeyBytes).toString('hex'));
+    check('P12 server: a second book cannot change the Gmail (fabricated spare envelope → 409)',
+      (await postJson(PORTAL_BASE, '/api/recover/setup', {
+        gmail: 'otp-attacker@example.com',
+        rkEnvelope: { v: 1, kdf: 'pbkdf2-sha256', iter: 600000, data: 'fabricated' },
+        token: vC.json.token,
+      })).status === 409);
+    check('P12 server: Gmail change with a bad token is refused and the binding stays',
+      await (async () => {
+        const r = await postJson(PORTAL_BASE, '/api/recover/setup', {
+          gmail: 'otp-attacker@example.com', rkEnvelope: reset.json.rkEnvelope,
+          token: '0'.repeat(64),
+        });
+        return r.json && r.json.ok === false && r.json.error === 'BAD_TOKEN'
+          && JSON.parse(fs.readFileSync(acctFile, 'utf8')).gmail === gNew;
+      })());
+    check('P12 server: Gmail change with a token for the WRONG Gmail is refused',
+      await (async () => {
+        const rqW = await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'change-gmail', gmail: 'otp-other@example.com' });
+        if (!rqW.json || !rqW.json.ok) return false;
+        const cW = outboxCodeFor('otp-other@example.com');
+        const vW = await postJson(PORTAL_BASE, '/api/otp/verify', { purpose: 'change-gmail', gmail: 'otp-other@example.com', code: cW });
+        if (!vW.json || !vW.json.ok) return false;
+        const r = await postJson(PORTAL_BASE, '/api/recover/setup', {
+          gmail: 'otp-mismatch@example.com', rkEnvelope: reset.json.rkEnvelope, token: vW.json.token,
+        });
+        return r.json && r.json.ok === false && r.json.error === 'BAD_TOKEN';
+      })());
+    // Recovery off: key file deleted, reset OTP refused, data/ never served.
+    // (The code changed with the reset above, so the current code is
+    // 654321 and the current envelope is the reset one.)
+    check('P12 server: recovery off deletes the spare key file',
+      (await postJson(PORTAL_BASE, '/api/recover/off', {
+        pin: '654321', passphrase: '', envelope: reset.json.envelope,
+      })).json.ok === true
+      && !fs.existsSync(keyFile));
+    check('P12 server: reset OTP is refused once recovery is off',
+      (await postJson(PORTAL_BASE, '/api/otp/request', { purpose: 'reset' })).json.error === 'RECOVERY_OFF');
+    check('P12 server: /data/recovery.key is never served (404)',
+      (await getRaw(PORTAL_BASE, '/data/recovery.key')).status === 404);
+    check('P12 server: /data/account.json is never served (404)',
+      (await getRaw(PORTAL_BASE, '/data/account.json')).status === 404);
+  } finally {
+    portalServer.kill();
+    unconfServer.kill();
+    try { fs.unlinkSync(path.join(__dirname, 'data', 'recovery.key')); } catch (_e) { /* already gone */ }
+    try { fs.unlinkSync(path.join(__dirname, 'data', 'account.json')); } catch (_e) { /* already gone */ }
+    try { fs.unlinkSync(outboxFile); } catch (_e) { /* already gone */ }
+  }
+
+  // ---- §11. P12 Phase 2 — account binding + session (vault.js, model.js) ----
+  // The browser's localStorage does not exist in Node: install a fake on
+  // globalThis for this section, then remove it again.
+  function fakeStorage() {
+    const m = new Map();
+    return {
+      getItem: (k) => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => { m.set(k, String(v)); },
+      removeItem: (k) => { m.delete(k); },
+      _map: m,
+    };
+  }
+  const savedLocalStorage = globalThis.localStorage;
+  globalThis.localStorage = fakeStorage();
+  try {
+    check('P12 portal: VaultState has REGISTER / MIGRATION / READY',
+      V.VaultState.REGISTER === 'register' && V.VaultState.MIGRATION === 'migration' && V.VaultState.READY === 'ready');
+    check('P12 portal: saveAccount returns true and loadAccount reads it back',
+      V.saveAccount({ gmail: 'test@example.com' }) === true
+      && JSON.stringify(V.loadAccount()) === JSON.stringify({ gmail: 'test@example.com' }));
+    check('P12 portal: loadAccount is null when nothing is saved',
+      (V.clearAccount(), V.loadAccount() === null));
+    check('P12 portal: a corrupt account value loads as null (never crashes)',
+      (globalThis.localStorage.setItem(V.ACCOUNT_KEY, 'not json'), V.loadAccount() === null));
+    check('P12 portal: saveAccount throws STORAGE_QUOTA when storage is full',
+      await (async () => {
+        const prev = globalThis.localStorage;
+        globalThis.localStorage = fakeStorage();
+        globalThis.localStorage.setItem = () => { throw new Error('QuotaExceededError'); };
+        let code = null;
+        try { V.saveAccount({ gmail: 'test@example.com' }); } catch (e) { code = e && e.code; }
+        globalThis.localStorage = prev;
+        return code === 'STORAGE_QUOTA';
+      })());
+    check('P12 portal: clearAccount removes the binding',
+      (V.saveAccount({ gmail: 'test@example.com' }), V.clearAccount(), V.loadAccount() === null));
+    const sess = V.saveSession('test@example.com');
+    check('P12 portal: saveSession stores the Gmail with a ~12h expiry',
+      sess.gmail === 'test@example.com'
+      && sess.expiresAt > Date.now() && sess.expiresAt <= Date.now() + 12 * 3600 * 1000 + 1000);
+    check('P12 portal: loadSession reads the session back',
+      JSON.stringify(V.loadSession()) === JSON.stringify(sess));
+    check('P12 portal: loadSession is null when nothing is saved',
+      (V.clearSession(), V.loadSession() === null));
+    check('P12 portal: an expired session loads as null and is removed',
+      (V.saveSession('test@example.com', -1),
+        V.loadSession() === null && globalThis.localStorage.getItem(V.SESSION_KEY) === null));
+    check('P12 portal: a corrupt session loads as null',
+      (globalThis.localStorage.setItem(V.SESSION_KEY, 'not json'), V.loadSession() === null));
+    check('P12 portal: isSessionValid is true before expiry, false at/after it',
+      V.isSessionValid({ gmail: 'test@example.com', expiresAt: 1000 }, 999) === true
+      && V.isSessionValid({ gmail: 'test@example.com', expiresAt: 1000 }, 1000) === false
+      && V.isSessionValid({ gmail: 'test@example.com', expiresAt: 1000 }, 1001) === false);
+    check('P12 portal: isSessionValid refuses an empty Gmail or no session',
+      V.isSessionValid({ gmail: '', expiresAt: 9999999999999 }, 0) === false
+      && V.isSessionValid(null, 0) === false);
+    check('P12 portal: clearSession removes the session',
+      (V.saveSession('test@example.com'), V.clearSession(), V.loadSession() === null));
+    check('P12 portal: confirmGmailChange needs no confirmation for the same address',
+      V.confirmGmailChange('test@example.com', 'test@example.com') === true);
+    check('P12 portal: confirmGmailChange needs no confirmation with no saved address',
+      V.confirmGmailChange('test@example.com', null) === true);
+    const facts = V.confirmGmailChange('new@example.com', 'old@example.com');
+    check('P12 portal: changing Gmail returns exactly 3 facts, naming the old address',
+      Array.isArray(facts) && facts.length === 3 && facts[1].includes('old@example.com'));
+    check('P12 portal: there is no rememberPin — the code is never saved',
+      V.rememberPin === undefined);
+    check('P12 portal: localStorage holds only the account + session keys (no PIN key)',
+      await (async () => {
+        const src = fs.readFileSync(path.join(__dirname, 'public', 'vault.js'), 'utf8');
+        const setItems = [...src.matchAll(/\.setItem\(([^,]+),/g)].map((m) => m[1].trim());
+        return JSON.stringify(setItems) === JSON.stringify(['ACCOUNT_KEY', 'SESSION_KEY'])
+          && !src.includes('rememberPin');
+      })());
+    check('P12 portal: the saved account/session JSON never contains a code or PIN field',
+      await (async () => {
+        V.saveAccount({ gmail: 'test@example.com' });
+        V.saveSession('test@example.com');
+        const a = globalThis.localStorage.getItem(V.ACCOUNT_KEY);
+        const s = globalThis.localStorage.getItem(V.SESSION_KEY);
+        V.clearAccount(); V.clearSession();
+        return !/pin|code/i.test(a) && !/pin|code/i.test(s);
+      })());
+    // model.js: migration status + Gmail change validation.
+    check('P12 portal: migration is linked when an account binding exists',
+      M.migrationStatusFromVault({}, { gmail: 'test@example.com' }) === 'linked');
+    check('P12 portal: migration is dismissed when the vault says so',
+      M.migrationStatusFromVault({ migrationDismissed: true }, null) === 'dismissed');
+    check('P12 portal: migration is pending otherwise',
+      M.migrationStatusFromVault({}, null) === 'pending'
+      && M.migrationStatusFromVault({ migrationDismissed: false }, {}) === 'pending');
+    const origVault = { householdName: 'Home' };
+    const dismissedVault = M.markMigrationDismissed(origVault);
+    check('P12 portal: marking dismissed returns a NEW vault, original untouched',
+      dismissedVault.migrationDismissed === true && origVault.migrationDismissed === undefined
+      && dismissedVault.householdName === 'Home');
+    check('P12 portal: migration options are link / skip / dont-ask-again',
+      M.MIGRATION_OPTIONS.LINK_GMAIL === 'link_gmail'
+      && M.MIGRATION_OPTIONS.SKIP_FOR_NOW === 'skip_for_now'
+      && M.MIGRATION_OPTIONS.DONT_ASK_AGAIN === 'dont_ask_again');
+    check('P12 portal: empty new Gmail is NO_GMAIL',
+      M.isValidGmailChange('', null) === 'NO_GMAIL'
+      && M.isValidGmailChange('   ', null) === 'NO_GMAIL');
+    check('P12 portal: a bad new Gmail is INVALID_GMAIL',
+      M.isValidGmailChange('not-an-email', null) === 'INVALID_GMAIL'
+      && M.isValidGmailChange('a@b', null) === 'INVALID_GMAIL');
+    check('P12 portal: the same Gmail (any case) is SAME_GMAIL',
+      M.isValidGmailChange('Test@Example.com', { gmail: 'test@example.com' }) === 'SAME_GMAIL');
+    check('P12 portal: a different valid Gmail is allowed',
+      M.isValidGmailChange('new@example.com', { gmail: 'test@example.com' }) === true
+      && M.isValidGmailChange('new@example.com', null) === true);
+  } finally {
+    if (savedLocalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = savedLocalStorage;
+  }
+
+  // ---- §12. P12 Phase 2 — register / login / migration in jsdom ----
+  // Fresh vm contexts per scenario (buildVmContext = §8 harness, with the
+  // mocked fetch portal API). The OTP code the fake "sends" is '123456'.
+  function portalCtx() {
+    const c = buildVmContext();
+    return {
+      ctx: c,
+      el: (id) => c._els[id],
+      hidden: (id) => c._els[id].classList.contains('hidden'),
+      visible: (id) => !c._els[id].classList.contains('hidden'),
+      store: c._store,
+    };
+  }
+  async function registerIn(p, gmail, pin) {
+    p.el('setup-gmail').value = gmail;
+    p.el('setup-pin').value = pin;
+    p.el('setup-pin2').value = pin;
+    p.el('setup-pass').value = '';
+    p.el('setup-btn').click();
+    // Harness note: an El starts with NO classes, so visible('setup-otp-section')
+    // is true before onSetup even runs — a plain visibility wait returns at
+    // once and the verify click races onSetup's async mail/OTP chain (the
+    // verify then sees pendingRegister still null). Wait for the OTP note
+    // text instead: onSetup sets it only after pendingRegister is stored and
+    // the OTP request succeeded.
+    await waitFor(() => p.el('setup-otp-note').textContent.includes(gmail)
+      && p.el('setup-otp-note').textContent.includes('10 minutes'));
+    p.el('setup-otp').value = '123456';
+    p.el('setup-verify-btn').click();
+    await waitFor(() => p.visible('vault-screen') && !!p.store.get(V.ACCOUNT_KEY));
+  }
+  // Exact wording (plan, "Exact wording" section) is on the screens.
+  check('P12 portal: register screen uses the plan wording',
+    htmlSrc.includes('Create your account')
+    && htmlSrc.includes('One Gmail, one code. This book is yours alone')
+    && htmlSrc.includes('We will send a 6-digit code to your Gmail to check it is yours.')
+    && htmlSrc.includes('If someone can open the files on your PC, they can find the spare key')
+    && htmlSrc.includes('You can turn this recovery off later in Security.')
+    && htmlSrc.includes('Create without Gmail — no forgot-code later'));
+  check('P12 portal: login + migration screens use the plan wording',
+    htmlSrc.includes('Open your book')
+    && htmlSrc.includes('Secure code (6 digits)')
+    && htmlSrc.includes('Forgot your code?')
+    && htmlSrc.includes('Not your Gmail?')
+    && htmlSrc.includes('One more step: add your Gmail')
+    && htmlSrc.includes('Skip for now — you can add it later in Security. Forgot-code will not work until then.')
+    && htmlSrc.includes('Mail is not set up on this PC yet, so no code can be sent.'));
+  {
+    // Registration happy path (mail configured).
+    const p = portalCtx();
+    check('P12 portal: first run shows the register screen',
+      p.visible('setup-screen') && p.hidden('unlock-screen') && p.hidden('vault-screen'));
+    p.el('setup-gmail').value = '';
+    p.el('setup-pin').value = '123456'; p.el('setup-pin2').value = '123456';
+    p.el('setup-btn').click();
+    await sleep(50);
+    check('P12 portal: an empty Gmail is refused on register',
+      p.el('setup-error').textContent.includes('Type your Gmail'));
+    p.el('setup-gmail').value = 'not-an-email';
+    p.el('setup-btn').click();
+    await sleep(50);
+    check('P12 portal: a bad Gmail is refused on register',
+      p.el('setup-error').textContent.includes('Type your Gmail'));
+    p.el('setup-gmail').value = 'test@example.com';
+    p.el('setup-btn').click();
+    check('P12 portal: Create my book sends a code and shows the OTP step',
+      await waitFor(() => p.visible('setup-otp-section')
+        && p.el('setup-otp-note').textContent.includes('test@example.com')
+        && p.el('setup-otp-note').textContent.includes('10 minutes')));
+    check('P12 portal: the OTP request went to the typed Gmail (fetch log)',
+      p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/otp/request') && c.body.gmail === 'test@example.com'));
+    p.el('setup-otp').value = '111111';
+    p.el('setup-verify-btn').click();
+    await sleep(50);
+    check('P12 portal: a wrong OTP is refused, the book stays closed',
+      p.el('setup-otp-error').textContent.includes('Wrong code') && p.hidden('vault-screen'));
+    p.el('setup-otp').value = '123456';
+    p.el('setup-verify-btn').click();
+    check('P12 portal: the right OTP opens the book',
+      await waitFor(() => p.visible('vault-screen')));
+    check('P12 portal: registration saves the account (Gmail + recovery on + spare envelope)',
+      await (async () => {
+        const raw = p.store.get(V.ACCOUNT_KEY);
+        if (!raw) return false;
+        const acct = JSON.parse(raw);
+        return acct.gmail === 'test@example.com' && acct.recoveryOn === true
+          && acct.rkEnvelope && typeof acct.verifiedAt === 'number';
+      })());
+    check('P12 portal: registration saves a 12h session for the Gmail',
+      await (async () => {
+        const raw = p.store.get(V.SESSION_KEY);
+        if (!raw) return false;
+        const sess = JSON.parse(raw);
+        return sess.gmail === 'test@example.com' && sess.expiresAt > p.ctx._now()
+          && sess.expiresAt <= p.ctx._now() + 12 * 3600 * 1000 + 1000;
+      })());
+    // Code-alone login with the saved Gmail.
+    p.el('lock-btn').click();
+    check('P12 portal: lock shows the login screen with the saved Gmail',
+      p.visible('unlock-screen') && p.el('unlock-gmail-addr').textContent === 'test@example.com'
+      && p.hidden('unlock-gmail-input-wrap'));
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('P12 portal: code-alone login reopens the book',
+      await waitFor(() => p.visible('vault-screen')));
+    // "Not your Gmail?" — a different Gmail is refused, the right one works.
+    p.el('lock-btn').click();
+    p.el('not-gmail-link').click();
+    check('P12 portal: Not your Gmail shows the Gmail field',
+      p.visible('unlock-gmail-input-wrap') && p.hidden('unlock-gmail-line'));
+    p.el('unlock-gmail').value = 'other@example.com';
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    await sleep(50);
+    check('P12 portal: a Gmail that does not match the book is refused',
+      p.el('unlock-error').textContent.includes('That Gmail does not match this book')
+      && p.hidden('vault-screen'));
+    p.el('unlock-gmail').value = 'test@example.com';
+    p.el('unlock-btn').click();
+    check('P12 portal: the matching Gmail + code opens the book',
+      await waitFor(() => p.visible('vault-screen')));
+  }
+  {
+    // Mail unconfigured: fallback creates a PIN-only book; migration
+    // asks after the next unlock and offers only Skip.
+    const p = portalCtx();
+    p.ctx._setMailConfigured(false);
+    p.el('setup-gmail').value = 'test@example.com';
+    p.el('setup-pin').value = '123456'; p.el('setup-pin2').value = '123456';
+    p.el('setup-btn').click();
+    check('P12 portal: mail not set up shows the note + fallback, no code sent',
+      await waitFor(() => p.visible('setup-mail-note') && p.visible('setup-fallback-btn')
+        && p.el('setup-mail-error').textContent.includes('Mail is not set up')));
+    check('P12 portal: no OTP was requested when mail is not set up',
+      !p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/otp/request')));
+    p.el('setup-fallback-btn').click();
+    check('P12 portal: Create without Gmail opens a PIN-only book',
+      await waitFor(() => p.visible('vault-screen')));
+    check('P12 portal: the PIN-only book has no account saved',
+      !p.store.has(V.ACCOUNT_KEY));
+    p.el('lock-btn').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('P12 portal: a PIN-only vault shows the migration screen after unlock',
+      await waitFor(() => p.visible('migration-screen') && p.hidden('vault-screen')));
+    check('P12 portal: migration with mail off shows the note and only Skip',
+      await waitFor(() => p.visible('mig-mail-note') && p.hidden('mig-send-btn')));
+    p.el('mig-skip-link').click();
+    check('P12 portal: Skip for now opens the book',
+      await waitFor(() => p.visible('vault-screen')));
+    p.el('lock-btn').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('P12 portal: Skip asks again on the next login (not dismissed)',
+      await waitFor(() => p.visible('migration-screen')));
+    p.el('mig-skip-link').click();
+    await waitFor(() => p.visible('vault-screen'));
+  }
+  {
+    // Migration link: Gmail → OTP → linked, account saved, no more asks.
+    const p = portalCtx();
+    p.ctx._setMailConfigured(false);
+    p.el('setup-gmail').value = 'test@example.com';
+    p.el('setup-pin').value = '123456'; p.el('setup-pin2').value = '123456';
+    p.el('setup-btn').click();
+    await waitFor(() => p.visible('setup-fallback-btn'));
+    p.el('setup-fallback-btn').click();
+    await waitFor(() => p.visible('vault-screen'));
+    p.el('lock-btn').click();
+    p.ctx._setMailConfigured(true);
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('P12 portal: migration screen offers Send code when mail is set up',
+      await waitFor(() => p.visible('migration-screen') && p.visible('mig-send-btn')));
+    p.el('mig-gmail').value = 'test@example.com';
+    p.el('mig-send-btn').click();
+    check('P12 portal: migration sends a link code and shows the OTP step',
+      await waitFor(() => p.visible('mig-otp-section')
+        && p.el('mig-otp-note').textContent.includes('test@example.com')));
+    check('P12 portal: the link OTP request used purpose link',
+      p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/otp/request') && c.body.purpose === 'link'));
+    p.el('mig-otp').value = '111111';
+    p.el('mig-verify-btn').click();
+    await sleep(50);
+    check('P12 portal: a wrong migration OTP is refused',
+      p.el('mig-error').textContent.includes('Wrong code') && p.visible('migration-screen'));
+    p.el('mig-otp').value = '123456';
+    p.el('mig-verify-btn').click();
+    check('P12 portal: the right migration OTP links the Gmail and opens the book',
+      await waitFor(() => p.visible('vault-screen')));
+    check('P12 portal: the linked account is saved (Gmail + recovery on)',
+      await (async () => {
+        const raw = p.store.get(V.ACCOUNT_KEY);
+        if (!raw) return false;
+        const acct = JSON.parse(raw);
+        return acct.gmail === 'test@example.com' && acct.recoveryOn === true;
+      })());
+    p.el('lock-btn').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('P12 portal: a linked vault never shows migration again',
+      await waitFor(() => p.visible('vault-screen') && p.hidden('migration-screen')));
+  }
+  {
+    // "Don't ask again": the flag is stored in the vault and migration
+    // never asks again, even after lock + unlock.
+    const p = portalCtx();
+    p.ctx._setMailConfigured(false);
+    p.el('setup-gmail').value = 'test@example.com';
+    p.el('setup-pin').value = '123456'; p.el('setup-pin2').value = '123456';
+    p.el('setup-btn').click();
+    await waitFor(() => p.visible('setup-fallback-btn'));
+    p.el('setup-fallback-btn').click();
+    await waitFor(() => p.visible('vault-screen'));
+    p.el('lock-btn').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    await waitFor(() => p.visible('migration-screen'));
+    p.el('mig-dont-ask-link').click();
+    check('P12 portal: Don\'t ask again opens the book',
+      await waitFor(() => p.visible('vault-screen')));
+    check('P12 portal: the vault now carries migrationDismissed',
+      await (async () => {
+        const raw = p.store.get('ghar-register-vault');
+        const env = JSON.parse(raw);
+        const res = await V.unlockVault('123456', '', env);
+        return res.vault.migrationDismissed === true;
+      })());
+    p.el('lock-btn').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('P12 portal: a dismissed vault never shows migration again',
+      await waitFor(() => p.visible('vault-screen') && p.hidden('migration-screen')));
+  }
+
+  // ---- §13. P12 Phase 3 — forgot-code reset in jsdom ----
+  check('P12 reset: reset screen uses the plan wording',
+    htmlSrc.includes('Reset your code')
+    && htmlSrc.includes('We will send a 6-digit code to')
+    && appSrc.includes('We sent a 6-digit code to')
+    && appSrc.includes('It works for 10 minutes and one time only.')
+    && htmlSrc.includes('New secure code (6 digits)')
+    && htmlSrc.includes('Type the new code again')
+    && htmlSrc.includes('Set new code and open my book')
+    && appSrc.includes('Your book is open. Your old code no longer works. Your extra passphrase was removed — you can set a new one in Security.')
+    && htmlSrc.includes('Forgot-code is off for this book — your code cannot be reset. Restore from a backup instead.'));
+  {
+    // Full round-trip: register → lockout (5 wrong codes) → forgot →
+    // OTP → new code → locked → login with the new code. Data survives
+    // (household name set before the reset is still there).
+    const p = portalCtx();
+    await registerIn(p, 'test@example.com', '123456');
+    p.ctx.location.hash = '#/profile';
+    p.ctx._dispatchWin('hashchange');
+    p.el('profile-household').value = 'Hashir Home';
+    p.el('profile-monthstart').value = '5';
+    p.el('profile-save-btn').click();
+    await waitFor(() => p.el('profile-ok').textContent.includes('Saved'));
+    check('P12 reset: household name saved before the reset',
+      p.el('sidebar-name').textContent === 'Hashir Home');
+    p.el('lock-btn').click();
+    for (let i = 0; i < 5; i++) {
+      p.el('unlock-pin').value = '999999';
+      p.el('unlock-btn').click();
+      // Serialise: wait for THIS attempt to finish (and record its failure)
+      // before the next click, as in the §8 lockout test.
+      await waitFor(() => p.el('unlock-error').textContent.includes('Wrong code'));
+      p.el('unlock-error').textContent = '';
+    }
+    check('P12 reset: 5 wrong codes lock the book before the reset',
+      await waitFor(() => p.el('lockout-note').textContent.includes('Too many wrong codes')));
+    p.el('forgot-link').click();
+    check('P12 reset: Forgot your code shows the saved Gmail',
+      await waitFor(() => p.visible('reset-screen')
+        && p.el('reset-gmail-addr').textContent === 'test@example.com'
+        && p.visible('reset-send-btn') && p.hidden('reset-off-note')));
+    p.el('reset-send-btn').click();
+    check('P12 reset: Send shows the OTP step with the 10-minute note',
+      await waitFor(() => p.visible('reset-otp-section')
+        && p.el('reset-otp-note').textContent.includes('We sent a 6-digit code to test@example.com')
+        && p.el('reset-otp-note').textContent.includes('10 minutes')));
+    check('P12 reset: the new-code step stays hidden until the OTP verifies',
+      p.hidden('reset-new-section'));
+    p.el('reset-otp').value = '111111';
+    p.el('reset-verify-btn').click();
+    await sleep(50);
+    check('P12 reset: a wrong OTP is refused, the new-code step stays hidden',
+      p.el('reset-otp-error').textContent.includes('Wrong code') && p.hidden('reset-new-section'));
+    p.el('reset-otp').value = '123456';
+    p.el('reset-verify-btn').click();
+    check('P12 reset: the right OTP opens the new-code step',
+      await waitFor(() => p.visible('reset-new-section')));
+    p.el('reset-new-pin').value = '654321';
+    p.el('reset-new-pin2').value = '654322';
+    p.el('reset-btn').click();
+    await sleep(50);
+    check('P12 reset: mismatched new codes are refused',
+      p.el('reset-new-error').textContent.includes('do not match') && p.visible('reset-screen'));
+    p.el('reset-new-pin').value = '654321';
+    p.el('reset-new-pin2').value = '654321';
+    p.el('reset-btn').click();
+    check('P12 reset: setting the new code locks the book (login with the new code)',
+      await waitFor(() => p.visible('unlock-screen') && p.hidden('vault-screen')));
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('P12 reset: the old code no longer opens the book',
+      await waitFor(() => p.el('unlock-error').textContent.includes('Wrong code')) && p.hidden('vault-screen'));
+    p.el('unlock-pin').value = '654321';
+    p.el('unlock-btn').click();
+    check('P12 reset: the new code opens the book right away (lockout cleared by the reset)',
+      await waitFor(() => p.visible('vault-screen')));
+    check('P12 reset: the exact success message shows once on Today',
+      !p.hidden('today-notice')
+      && p.el('today-notice').textContent.includes('Your book is open. Your old code no longer works.'));
+    check('P12 reset: the book data survived the reset (household name still there)',
+      p.el('sidebar-name').textContent === 'Hashir Home');
+    check('P12 reset: the stored envelope now opens with the new code only',
+      await (async () => {
+        const env = JSON.parse(p.store.get('ghar-register-vault'));
+        try { await V.unlockVault('123456', '', env); return false; }
+        catch (e) { if (!e || e.code !== 'DECRYPT_FAILED') return false; }
+        const res = await V.unlockVault('654321', '', env);
+        return JSON.stringify(res.vault.householdName) === '"Hashir Home"';
+      })());
+  }
+  {
+    // Recovery off: a PIN-only book gets the plain off message, no Send,
+    // and the envelope is left untouched.
+    const p = portalCtx();
+    p.ctx._setMailConfigured(false);
+    p.el('setup-gmail').value = 'test@example.com';
+    p.el('setup-pin').value = '123456'; p.el('setup-pin2').value = '123456';
+    p.el('setup-btn').click();
+    await waitFor(() => p.visible('setup-fallback-btn'));
+    p.el('setup-fallback-btn').click();
+    await waitFor(() => p.visible('vault-screen'));
+    const envBefore = p.store.get('ghar-register-vault');
+    p.el('lock-btn').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    await waitFor(() => p.visible('migration-screen'));
+    p.el('mig-skip-link').click();
+    await waitFor(() => p.visible('vault-screen'));
+    p.el('lock-btn').click();
+    p.el('forgot-link').click();
+    // fillReset's off branch hides the Send button and the Gmail line; the
+    // off-note text itself is static HTML (asserted by the wording check
+    // above) — the harness El never sees static text, so the runtime signal
+    // here is the hidden Send button + hidden Gmail line.
+    check('P12 reset: recovery off shows the plain off message, no Send button',
+      await waitFor(() => p.hidden('reset-send-btn') && p.hidden('reset-gmail-line')));
+    check('P12 reset: recovery off leaves the envelope untouched',
+      p.store.get('ghar-register-vault') === envBefore);
+  }
+  {
+    // Other-tab lock: the envelope changing under another tab locks
+    // this tab at once; any other key does nothing.
+    const p = portalCtx();
+    await registerIn(p, 'test@example.com', '123456');
+    p.ctx._dispatchWin('storage', { key: 'something-else' });
+    check('P12 reset: an unrelated storage change does not lock the book',
+      p.visible('vault-screen'));
+    p.ctx._dispatchWin('storage', { key: 'ghar-register-vault' });
+    check('P12 reset: the envelope changing in another tab locks this tab',
+      await waitFor(() => p.visible('unlock-screen') && p.hidden('vault-screen')));
+  }
+
+  // ---- §14. P12 Phase 4 — Security: Gmail change + recovery on/off ----
+  check('P12 security: Security page uses the plan wording',
+    htmlSrc.includes('Change login Gmail')
+    && htmlSrc.includes('Forgot-code recovery')
+    && htmlSrc.includes('Login Gmail:')
+    && appSrc.includes('Forgot-code is now off. If you forget your code, the book cannot be opened.')
+    && appSrc.includes('Login Gmail changed to'));
+  {
+    // Gmail change happy path: wrong OTP refused, right OTP changes the
+    // Gmail, the spare envelope is NOT affected, the old Gmail is
+    // notified (mock records the setup call), Profile line updates.
+    const p = portalCtx();
+    await registerIn(p, 'test@example.com', '123456');
+    const acctBefore = JSON.parse(p.store.get(V.ACCOUNT_KEY));
+    p.ctx.location.hash = '#/security';
+    p.ctx._dispatchWin('hashchange');
+    check('P12 security: Security shows the current login Gmail + recovery on',
+      await waitFor(() => p.el('change-gmail-current').textContent === 'test@example.com'
+        && p.el('recovery-status').textContent.includes('recovery: on')));
+    p.el('change-gmail-new').value = 'test@example.com';
+    p.el('change-gmail-send-btn').click();
+    await sleep(50);
+    check('P12 security: changing to the same Gmail is refused',
+      p.el('change-gmail-error').textContent.includes('already your login Gmail'));
+    p.el('change-gmail-new').value = 'not-an-email';
+    p.el('change-gmail-send-btn').click();
+    await sleep(50);
+    check('P12 security: a bad new Gmail is refused',
+      p.el('change-gmail-error').textContent.includes('looks right'));
+    p.el('change-gmail-new').value = 'new@example.com';
+    p.el('change-gmail-send-btn').click();
+    check('P12 security: Send shows the OTP step for the NEW Gmail',
+      await waitFor(() => p.el('change-gmail-otp-note').textContent.includes('new@example.com')
+        && p.el('change-gmail-otp-note').textContent.includes('10 minutes')));
+    p.el('change-gmail-otp').value = '111111';
+    p.el('change-gmail-verify-btn').click();
+    await sleep(50);
+    check('P12 security: a wrong change OTP is refused',
+      p.el('change-gmail-otp-error').textContent.includes('Wrong code'));
+    p.el('change-gmail-otp').value = '123456';
+    p.el('change-gmail-verify-btn').click();
+    check('P12 security: the right OTP changes the login Gmail',
+      await waitFor(() => p.el('change-gmail-ok').textContent.includes('Login Gmail changed to new@example.com')));
+    check('P12 security: the old Gmail got the note (success line says so)',
+      p.el('change-gmail-ok').textContent.includes('old Gmail got a note'));
+    const acctAfter = JSON.parse(p.store.get(V.ACCOUNT_KEY));
+    check('P12 security: the account keeps recovery on with the SAME spare envelope',
+      acctAfter.gmail === 'new@example.com' && acctAfter.recoveryOn === true
+      && JSON.stringify(acctAfter.rkEnvelope) === JSON.stringify(acctBefore.rkEnvelope));
+    check('P12 security: the change call sent the spare envelope + token (mock log)',
+      p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/recover/setup')
+        && c.body.gmail === 'new@example.com' && c.body.rkEnvelope
+        && c.body.token === 'tok-change-gmail'));
+    check('P12 security: the session moves to the new Gmail',
+      JSON.parse(p.store.get(V.SESSION_KEY)).gmail === 'new@example.com');
+    p.ctx.location.hash = '#/profile';
+    p.ctx._dispatchWin('hashchange');
+    check('P12 security: the Profile page shows the new login Gmail',
+      await waitFor(() => p.el('profile-login-gmail').textContent === 'new@example.com'));
+  }
+  {
+    // Recovery off → forgot shows the off message; back on (with the
+    // current code) → reset works again.
+    const p = portalCtx();
+    await registerIn(p, 'test@example.com', '123456');
+    const rkBefore = JSON.parse(p.store.get(V.ACCOUNT_KEY)).rkEnvelope;
+    p.ctx.location.hash = '#/security';
+    p.ctx._dispatchWin('hashchange');
+    // D5: turning recovery off needs the current code, typed at the top
+    // of the Security page — without it the button refuses.
+    p.el('recovery-off-btn').click();
+    check('P12 security: turning recovery off without the current code is refused',
+      await waitFor(() => p.el('recovery-error').textContent.includes('Current PIN must be exactly 6 digits'))
+      && !p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/recover/off')));
+    p.el('security-pin').value = '123456';
+    p.el('recovery-off-btn').click();
+    check('P12 security: turning recovery off shows the plan message',
+      await waitFor(() => p.el('recovery-ok').textContent.includes('Forgot-code is now off. If you forget your code, the book cannot be opened.')));
+    const acctOff = JSON.parse(p.store.get(V.ACCOUNT_KEY));
+    check('P12 security: turning off drops the spare envelope, keeps the Gmail',
+      acctOff.gmail === 'test@example.com' && acctOff.recoveryOn === false && !acctOff.rkEnvelope);
+    check('P12 security: turning off called /api/recover/off with the current code + envelope',
+      p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/recover/off')
+        && c.body.pin === '123456' && c.body.envelope && typeof c.body.envelope.data === 'string'));
+    check('P12 security: with recovery off, the change-Gmail section hides',
+      p.hidden('change-gmail-section') && !p.hidden('change-gmail-unavailable'));
+    p.el('lock-btn').click();
+    p.el('forgot-link').click();
+    check('P12 security: with recovery off, forgot shows the off message, no Send',
+      await waitFor(() => p.hidden('reset-send-btn') && p.hidden('reset-gmail-line')));
+    // Back on: the current code is typed at the top, as the page asks.
+    p.el('reset-back-link').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    await waitFor(() => p.visible('vault-screen'));
+    p.ctx.location.hash = '#/security';
+    p.ctx._dispatchWin('hashchange');
+    p.el('security-pin').value = '123456';
+    p.el('recovery-on-btn').click();
+    check('P12 security: turning recovery back on works with the current code',
+      await waitFor(() => p.el('recovery-ok').textContent.includes('Forgot-code recovery is on again.')));
+    const acctOn = JSON.parse(p.store.get(V.ACCOUNT_KEY));
+    check('P12 security: turning back on makes a NEW spare envelope',
+      acctOn.recoveryOn === true && acctOn.rkEnvelope
+      && JSON.stringify(acctOn.rkEnvelope) !== JSON.stringify(rkBefore));
+    // Reset works again after turning back on.
+    p.el('lock-btn').click();
+    p.el('forgot-link').click();
+    p.el('reset-send-btn').click();
+    check('P12 security: reset Send works again after turning back on',
+      await waitFor(() => p.el('reset-otp-note').textContent.includes('10 minutes')));
+    p.el('reset-otp').value = '123456';
+    p.el('reset-verify-btn').click();
+    await waitFor(() => p.visible('reset-new-section'));
+    p.el('reset-new-pin').value = '654321';
+    p.el('reset-new-pin2').value = '654321';
+    p.el('reset-btn').click();
+    check('P12 security: reset works again after turning recovery back on',
+      await waitFor(() => p.visible('unlock-screen') && p.hidden('vault-screen')));
+    p.el('unlock-pin').value = '654321';
+    p.el('unlock-btn').click();
+    check('P12 security: the new code opens the book after the re-on reset',
+      await waitFor(() => p.visible('vault-screen')));
+  }
+  {
+    // Never linked: Security offers the link (Gmail + code), OTP first,
+    // then the book links. With mail off, Send says so plainly.
+    const p = portalCtx();
+    p.ctx._setMailConfigured(false);
+    p.el('setup-gmail').value = 'test@example.com';
+    p.el('setup-pin').value = '123456'; p.el('setup-pin2').value = '123456';
+    p.el('setup-btn').click();
+    await waitFor(() => p.el('setup-mail-error').textContent.includes('Mail is not set up'));
+    p.el('setup-fallback-btn').click();
+    await waitFor(() => p.visible('vault-screen'));
+    p.el('lock-btn').click();
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    await waitFor(() => p.visible('migration-screen'));
+    p.el('mig-skip-link').click();
+    await waitFor(() => p.visible('vault-screen'));
+    p.ctx.location.hash = '#/security';
+    p.ctx._dispatchWin('hashchange');
+    check('P12 security: a never-linked book is offered the link in Security',
+      await waitFor(() => p.el('recovery-status').textContent.includes('no Gmail linked yet')
+        && !p.hidden('recovery-gmail-wrap')));
+    check('P12 security: a never-linked book has no change-Gmail section',
+      p.hidden('change-gmail-section') && !p.hidden('change-gmail-unavailable'));
+    p.ctx.location.hash = '#/profile';
+    p.ctx._dispatchWin('hashchange');
+    check('P12 security: the Profile page shows no login Gmail yet',
+      await waitFor(() => !p.hidden('profile-login-gmail-none') && p.hidden('profile-login-gmail-line')));
+    p.ctx.location.hash = '#/security';
+    p.ctx._dispatchWin('hashchange');
+    p.el('recovery-gmail').value = 'test@example.com';
+    p.el('security-pin').value = '123456';
+    p.el('recovery-send-btn').click();
+    check('P12 security: link Send with mail off says so plainly',
+      await waitFor(() => p.el('recovery-error').textContent.includes('Mail is not set up')));
+    p.ctx._setMailConfigured(true);
+    p.el('recovery-send-btn').click();
+    check('P12 security: link Send shows the OTP step',
+      await waitFor(() => p.el('recovery-otp-note').textContent.includes('test@example.com')));
+    p.el('recovery-otp').value = '111111';
+    p.el('recovery-verify-btn').click();
+    await sleep(50);
+    check('P12 security: a wrong link OTP is refused',
+      p.el('recovery-otp-error').textContent.includes('Wrong code'));
+    p.el('recovery-otp').value = '123456';
+    p.el('recovery-verify-btn').click();
+    check('P12 security: the right OTP links the Gmail from Security',
+      await waitFor(() => p.el('recovery-ok').textContent.includes('Gmail linked. Forgot-code recovery is on.')));
+    const acct = JSON.parse(p.store.get(V.ACCOUNT_KEY));
+    check('P12 security: the linked account has recovery on + a spare envelope',
+      acct.gmail === 'test@example.com' && acct.recoveryOn === true && !!acct.rkEnvelope);
+    p.ctx.location.hash = '#/profile';
+    p.ctx._dispatchWin('hashchange');
+    check('P12 security: the Profile page shows the linked Gmail',
+      await waitFor(() => p.el('profile-login-gmail').textContent === 'test@example.com'));
+  }
+
+  // ---- §15. Review fixes (2026-11-07): D1–D6, D12–D14 + improvements ----
+  // D1: "today" is the local calendar date, not UTC.
+  check('D1: localDateStr builds from local parts, not UTC',
+    M.localDateStr(new Date(2026, 10, 7, 2, 56)) === '2026-11-07'
+    && M.localDateStr(new Date(2026, 0, 5, 23, 59)) === '2026-01-05');
+  check('D1: the Pakistan date for a fixed 02:56 PKT instant is Nov 7, not Nov 6 (TZ child process)',
+    await (async () => {
+      try {
+        const out = require('node:child_process').execFileSync('node', ['-e',
+          "const M=require(require('node:path').join(process.argv[1],'public','model.js'));"
+          + "const now=new Date();"
+          + "console.log(M.localDateStr(new Date('2026-11-07T02:56:00+05:00')));"
+          + "console.log(M.todayStr());"
+          + "console.log(new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Karachi',year:'numeric',month:'2-digit',day:'2-digit'}).format(now));",
+          __dirname],
+        { env: { ...process.env, TZ: 'Asia/Karachi' }, encoding: 'utf8' }).trim().split('\n');
+        return out.length === 3 && out[0] === '2026-11-07' && out[1] === out[2];
+      } catch (_e) { return false; }
+    })());
+  // D2: a big advance never makes the net negative — the shortfall carries.
+  {
+    const v = M.emptyVault();
+    const s = M.addStaff(v, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-01', leavePerMonth: 2 });
+    M.addAdvance(v, s.id, { amount: 20000, date: '2026-11-01', recovery: 'full' });
+    const w = M.payWorkingForHelper(s, '2026-11');
+    check('D2: Rs 15,000 salary + Rs 20,000 advance shows net Rs 0, Rs 5,000 carries',
+      w.netPkr === 0 && w.advanceRecovery === 15000 && w.advanceCarriedPkr === 5000, w);
+    const rec = M.markMonthPaid(v, s.id, '2026-11', '2026-11-30');
+    check('D2: marking paid recovers only Rs 15,000 — recoveredPkr never grows past the salary',
+      rec.netPkr === 0 && s.advances[0].recoveredPkr === 15000 && M.advanceRemaining(s.advances[0]) === 5000);
+    check('D2: the carried Rs 5,000 is recovered from the next month (net Rs 10,000)',
+      M.computeMonthPay(v, s.id, '2026-12').advanceRecovery === 5000
+      && M.computeMonthPay(v, s.id, '2026-12').netPkr === 10000);
+    check('D2: the pay statement names the carry-forward',
+      M.staffPayStatement(s, '2026-11').includes('Rs 5,000 of this advance carries to next month'));
+    const v2 = M.emptyVault();
+    const s2 = M.addStaff(v2, { name: 'Bilal', role: 'maid', salaryPkr: 15000, joinedDate: '2026-10-01', leavePerMonth: 0 });
+    for (let d = 1; d <= 31; d++) M.markAttendance(v2, s2.id, '2026-10-' + String(d).padStart(2, '0'), 'absent');
+    check('D2: absence deductions alone never push the net below Rs 0 either',
+      M.computeMonthPay(v2, s2.id, '2026-10').netPkr === 0);
+  }
+  // D3: an advance is recovered only from its own month onward.
+  {
+    const v = M.emptyVault();
+    const s = M.addStaff(v, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-10-01', leavePerMonth: 2 });
+    M.addAdvance(v, s.id, { amount: 3000, date: '2026-11-20', recovery: 'full' });
+    check('D3: an advance dated Nov 20 is not recovered from October pay',
+      M.computeMonthPay(v, s.id, '2026-10').advanceRecovery === 0
+      && M.computeMonthPay(v, s.id, '2026-10').netPkr === 15000);
+    const rec = M.markMonthPaid(v, s.id, '2026-10', '2026-10-31');
+    check('D3: marking October paid leaves the November advance untouched',
+      rec.netPkr === 15000 && s.advances[0].recoveredPkr === 0);
+    check('D3: the advance is recovered in full from November pay',
+      M.computeMonthPay(v, s.id, '2026-11').advanceRecovery === 3000);
+  }
+  // D4: no attendance before the join date, none in the future; old
+  // pre-join marks never deduct (the review's own example).
+  {
+    const v = M.emptyVault();
+    const s = M.addStaff(v, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-16', leavePerMonth: 2 });
+    s.attendance['2026-11-02'] = 'absent';
+    s.attendance['2026-11-03'] = 'absent';
+    s.attendance['2026-11-04'] = 'absent';
+    const w = M.computeMonthPay(v, s.id, '2026-11');
+    check('D4: absents marked before the join date never deduct (net Rs 7,500, not Rs 7,000)',
+      w.absentDays === 0 && w.salaryPkr === 7500 && w.netPkr === 7500, w);
+  }
+  {
+    const v = M.emptyVault();
+    const s = M.addStaff(v, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-06', leavePerMonth: 2 });
+    check('D4: attendance before the join date is refused',
+      throwsCode(() => M.markAttendance(v, s.id, '2026-11-05', 'absent'), 'VALIDATION'));
+    const tomorrow = (() => {
+      const d = new Date(Date.now() + 86400000);
+      return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0')
+        + '-' + String(d.getDate()).padStart(2, '0');
+    })();
+    check('D4: attendance in the future is refused',
+      throwsCode(() => M.markAttendance(v, s.id, tomorrow, 'absent'), 'VALIDATION'));
+    check('D4: attendance on the join date itself works',
+      M.markAttendance(v, s.id, '2026-11-06', 'absent').mark === 'absent');
+  }
+  // D6: delete + salary edit, refusing locked months (date-relative, so
+  // the suite stays green whatever day it runs).
+  {
+    const curMonth = M.todayStr().slice(0, 7);
+    const curDate = M.todayStr();
+    const v = M.emptyVault();
+    const s = M.addStaff(v, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-01', leavePerMonth: 2 });
+    const adv = M.addAdvance(v, s.id, { amount: 2000, date: curDate, recovery: 'full' });
+    check('D6: deleteAdvance removes the advance while its month is unpaid',
+      M.deleteAdvance(v, s.id, adv.id).id === adv.id && s.advances.length === 0);
+    check('D6: deleteAdvance of a missing advance fails (NOT_FOUND)',
+      throwsCode(() => M.deleteAdvance(v, s.id, 'nope'), 'NOT_FOUND'));
+    const adv2 = M.addAdvance(v, s.id, { amount: 2000, date: curDate, recovery: 'full' });
+    M.markMonthPaid(v, s.id, curMonth, curDate);
+    check('D6: deleteAdvance refuses once its month is marked paid',
+      throwsCode(() => M.deleteAdvance(v, s.id, adv2.id), 'LOCKED'));
+    check('D6: deleteStaff refuses a helper with a paid month',
+      throwsCode(() => M.deleteStaff(v, s.id), 'LOCKED'));
+    check('D6: updateStaffSalary refuses while the current month is paid',
+      throwsCode(() => M.updateStaffSalary(v, s.id, 16000), 'LOCKED'));
+    const v2 = M.emptyVault();
+    const s2 = M.addStaff(v2, { name: 'Bilal', role: 'driver', salaryPkr: 10000, joinedDate: '2026-11-01', leavePerMonth: 2 });
+    check('D6: updateStaffSalary changes the salary on an open month',
+      M.updateStaffSalary(v2, s2.id, 12000).salaryPkr === 12000
+      && M.computeMonthPay(v2, s2.id, curMonth).salaryPkr === 12000);
+    check('D6: updateStaffSalary refuses a bad salary',
+      throwsCode(() => M.updateStaffSalary(v2, s2.id, 0), 'VALIDATION'));
+    check('D6: deleteStaff removes a helper with no paid months',
+      M.deleteStaff(v2, s2.id).id === s2.id && v2.staff.length === 0);
+    const d = M.addDelivery(v, { name: 'Doodhwala', kind: 'Doodhwala', unit: 'litre', ratePkr: 220, usualQty: 1 });
+    check('D6: deleteDelivery removes a delivery with no paid months',
+      M.deleteDelivery(v, d.id).id === d.id && v.deliveries.length === 0);
+    const d2 = M.addDelivery(v, { name: 'Gas', kind: 'Gas cylinder', unit: 'cylinder', ratePkr: 3000, usualQty: 1 });
+    M.markDeliveryMonthPaid(v, d2.id, curMonth, curDate);
+    check('D6: deleteDelivery refuses a delivery with a paid month',
+      throwsCode(() => M.deleteDelivery(v, d2.id), 'LOCKED'));
+    const p = M.addUdhaarPerson(v, { person: 'Ahmed' });
+    const e = M.addUdhaarEntry(v, p.id, { direction: 'lent', amountPkr: 5000, date: '2026-11-01' });
+    check('D6: deleteUdhaarEntry removes the entry',
+      M.deleteUdhaarEntry(v, p.id, e.id).id === e.id && p.entries.length === 0);
+    check('D6: deleteUdhaarPerson removes the person',
+      M.deleteUdhaarPerson(v, p.id).id === p.id && v.udhaar.length === 0);
+    check('D6: deleteUdhaarPerson of a missing person fails (NOT_FOUND)',
+      throwsCode(() => M.deleteUdhaarPerson(v, 'nope'), 'NOT_FOUND'));
+  }
+  // D14: gas "days since refill" never goes negative.
+  {
+    const v = M.emptyVault();
+    const d = M.addDelivery(v, { name: 'Gas', kind: 'Gas cylinder', unit: 'cylinder', ratePkr: 3000, usualQty: 1 });
+    M.addGasRefill(v, d.id, { date: '2026-11-20', pricePkr: 3000 });
+    check('D14: gas days since a future refill clamps at 0, never negative',
+      M.gasDaysSinceLastRefill(d, '2026-11-07') === 0);
+    check('D14: gas days since a past refill still counts',
+      M.gasDaysSinceLastRefill(d, '2026-11-25') === 5);
+  }
+  // Improvement 9: Today shows the worked net on the staff row.
+  {
+    const v = M.emptyVault();
+    const s = M.addStaff(v, { name: 'Ayesha', role: 'maid', salaryPkr: 15000, joinedDate: '2026-11-01', leavePerMonth: 2 });
+    M.addAdvance(v, s.id, { amount: 2000, date: '2026-11-01', recovery: 'full' });
+    const row = M.todayItems(v, '2026-11-25').find((i) => i.kind === 'staff');
+    check('Imp9: the Today staff row shows the worked net, not just the salary',
+      !!row && row.detail.includes('Rs 13,000 net payable') && row.detail.includes('Rs 15,000 salary'), row && row.detail);
+  }
+  // Improvement 10: an undated udhaar row carries the "no due date" label.
+  check('Imp10: dueLabel says "no due date" for an undated row',
+    M.dueLabel({ noDueDate: true }) === 'no due date');
+  // Improvement 12: medicine quantities in 0.5 steps; a dose is still 1.
+  {
+    const v = M.emptyVault();
+    check('Imp12: a medicine with 10.5 tablets is accepted (0.5 steps)',
+      M.addMedicine(v, { name: 'Panadol', qtyLeft: 10.5, unit: 'tablets', expiryDate: '2027-06-01' }).qtyLeft === 10.5);
+    check('Imp12: a medicine with 10.25 tablets is refused',
+      throwsCode(() => M.addMedicine(v, { name: 'X', qtyLeft: 10.25, expiryDate: '2027-06-01' }), 'VALIDATION'));
+    const med = M.addMedicine(v, { name: 'Half', qtyLeft: 0.5, unit: 'tablets', expiryDate: '2027-06-01' });
+    check('Imp12: a dose tick from 0.5 left is refused (a dose is a whole tablet)',
+      throwsCode(() => M.recordDose(v, med.id, { date: '2026-11-07', time: '08:00' }), 'VALIDATION'));
+    check('Imp12: a dose tick from 1.5 leaves 0.5',
+      (() => {
+        const m2 = M.addMedicine(v, { name: 'OneHalf', qtyLeft: 1.5, unit: 'tablets', expiryDate: '2027-06-01' });
+        M.recordDose(v, m2.id, { date: '2026-11-07', time: '08:00' });
+        return m2.qtyLeft === 0.5;
+      })());
+  }
+  // D10: the dead CSV import half is gone; the export half still works.
+  check('D10: csv.js has no dead import half left (CsvImport, guessMapping, markDuplicates)',
+    !/CsvImport|guessMapping|markDuplicates|rowsToTransactions|parseAmountCell|parseDateCell/.test(
+      fs.readFileSync(path.join(__dirname, 'public', 'csv.js'), 'utf8'))
+    && typeof C.parseCsv === 'function' && typeof C.rowsToCsv === 'function'
+    && typeof C.buildCombinedCsv === 'function' && C.CsvImport === undefined);
+  // D7 + D8: the fixed copy is on the page.
+  check('D7: the Home page says deleting the spare key stops recovery, not the book',
+    htmlSrc.includes('If the spare key file is deleted, forgot-code recovery stops working — the book still opens with your code'));
+  check('D8: the Security page says PIN (and passphrase, if you set one)',
+    htmlSrc.includes('The book opens with your PIN (and passphrase, if you set one)'));
+  // D4 / D6 / Imp7 / Imp8 / Imp11 / D13 in the fake DOM.
+  {
+    const p = portalCtx();
+    await registerIn(p, 'test@example.com', '123456');
+    p.ctx.location.hash = '#/staff';
+    p.ctx._dispatchWin('hashchange');
+    p.el('staff-month').value = '2026-05';
+    p.el('staff-month').dispatch('change');
+    p.el('staff-name').value = 'Ayesha';
+    p.el('staff-role').value = 'maid';
+    p.el('staff-salary').value = '15000';
+    p.el('staff-joined').value = '2026-05-01';
+    p.el('staff-leave').value = '2';
+    p.el('staff-add-btn').click();
+    await waitFor(() => p.el('staff-add-ok').textContent.includes('Helper added'));
+    // D4 UI: future-day buttons are disabled (fake today is May 28).
+    const staffHtml = () => p.el('staff-list').innerHTML;
+    check('D4 UI: future-day attendance buttons are disabled, today is not',
+      staffHtml().includes('data-date="2026-05-29" disabled')
+      && staffHtml().includes('data-date="2026-05-31" disabled')
+      && !staffHtml().includes('data-date="2026-05-28" disabled'));
+    const helperId = (() => {
+      const m = staffHtml().match(/data-helper="([^"]+)"/);
+      return m ? m[1] : null;
+    })();
+    check('D4 UI: the helper card carries a helper id', !!helperId);
+    // D6 UI: advance delete (two-tap), salary change, helper delete (two-tap).
+    p.el('adv-helper').value = helperId;
+    p.el('adv-amount').value = '2000';
+    p.el('adv-date').value = '2026-05-05';
+    p.el('adv-add-btn').click();
+    await waitFor(() => p.el('adv-ok').textContent.includes('Advance recorded')
+      && staffHtml().includes('Remaining advance: Rs 2,000'));
+    const advId = (() => {
+      const m = staffHtml().match(/data-advance="([^"]+)"/);
+      return m ? m[1] : null;
+    })();
+    p.el('staff-list').dispatch('click',
+      { target: { dataset: { action: 'advdel', helper: helperId, advance: advId }, parentElement: null } });
+    await sleep(50);
+    check('D6 UI: first delete tap on an advance only arms it',
+      staffHtml().includes('Tap again to delete') && staffHtml().includes('Remaining advance: Rs 2,000'));
+    p.el('staff-list').dispatch('click',
+      { target: { dataset: { action: 'advdel', helper: helperId, advance: advId }, parentElement: null } });
+    check('D6 UI: second delete tap removes the advance',
+      await waitFor(() => p.el('staff-add-ok').textContent.includes('Advance deleted')
+        && staffHtml().includes('No advances')));
+    p.el('salary-helper').value = helperId;
+    p.el('salary-new').value = '16000';
+    p.el('salary-save-btn').click();
+    check('D6 UI: changing the salary updates the helper card',
+      await waitFor(() => p.el('salary-ok').textContent.includes('Salary changed')
+        && staffHtml().includes('Rs 16,000')));
+    p.el('staff-list').dispatch('click',
+      { target: { dataset: { action: 'staffdel', helper: helperId }, parentElement: null } });
+    await sleep(50);
+    check('D6 UI: first delete tap on a helper only arms it',
+      staffHtml().includes('Tap again to delete') && staffHtml().includes('Ayesha'));
+    p.el('staff-list').dispatch('click',
+      { target: { dataset: { action: 'staffdel', helper: helperId }, parentElement: null } });
+    check('D6 UI: second delete tap removes the helper',
+      await waitFor(() => p.el('staff-add-ok').textContent.includes('Helper deleted')
+        && p.visible('staff-empty')));
+    // Imp7 + Imp8: log the whole week, then the whole month (fake today
+    // is Thursday May 28: the week is Mon May 25 – Thu May 28, 4 days).
+    p.ctx.location.hash = '#/deliveries';
+    p.ctx._dispatchWin('hashchange');
+    p.el('del-month').value = '2026-05';
+    p.el('del-month').dispatch('change');
+    p.el('del-name').value = 'Doodhwala';
+    p.el('del-kind').value = 'Doodhwala';
+    p.el('del-unit').value = 'litre';
+    p.el('del-rate').value = '220';
+    p.el('del-qty').value = '1';
+    p.el('del-add-btn').click();
+    await waitFor(() => p.el('del-add-ok').textContent.includes('Delivery added'));
+    const delId = (() => {
+      const m = p.el('log-delivery').innerHTML.match(/value="([^"]+)"/);
+      return m ? m[1] : null;
+    })();
+    p.el('log-delivery').value = delId;
+    p.el('log-week-btn').click();
+    check('Imp7 UI: Log this whole week fills the unlogged days of the current week at the usual quantity',
+      await waitFor(() => p.el('log-ok').textContent.includes('Logged 4 days')));
+    p.el('log-month-btn').click();
+    check('Imp7 UI: Log this whole month fills the rest of the month',
+      await waitFor(() => p.el('log-ok').textContent.includes('Logged 24 days')));
+    const delHtml = () => p.el('deliveries-list').innerHTML;
+    check('Imp8 UI: the delivery bill shows the days not logged yet (31 − 28 = 3)',
+      delHtml().includes('28 days logged') && delHtml().includes('3 days not logged yet')
+      && delHtml().includes('Rs 6,160'));
+    // D6 UI: delivery delete (two-tap).
+    p.el('deliveries-list').dispatch('click',
+      { target: { dataset: { action: 'deldel', delivery: delId }, parentElement: null } });
+    await sleep(50);
+    check('D6 UI: first delete tap on a delivery only arms it',
+      delHtml().includes('Tap again to delete') && delHtml().includes('Doodhwala'));
+    p.el('deliveries-list').dispatch('click',
+      { target: { dataset: { action: 'deldel', delivery: delId }, parentElement: null } });
+    check('D6 UI: second delete tap removes the delivery',
+      await waitFor(() => p.el('del-add-ok').textContent.includes('Delivery deleted')
+        && p.visible('deliveries-empty')));
+    // D6 UI: udhaar entry + person delete (two-tap each).
+    p.ctx.location.hash = '#/udhaar';
+    p.ctx._dispatchWin('hashchange');
+    p.el('udh-person-name').value = 'Ahmed';
+    p.el('udh-person-add-btn').click();
+    await waitFor(() => p.el('udh-person-ok').textContent.includes('Person added'));
+    const udhHtml = () => p.el('udhaar-list').innerHTML;
+    const personId = (() => {
+      const m = p.el('udh-entry-person').innerHTML.match(/value="([^"]+)"/);
+      return m ? m[1] : null;
+    })();
+    p.el('udh-entry-person').value = personId;
+    p.el('udh-entry-direction').value = 'lent';
+    p.el('udh-entry-amount').value = '5000';
+    p.el('udh-entry-date').value = '2026-05-01';
+    p.el('udh-entry-add-btn').click();
+    await waitFor(() => p.el('udh-entry-ok').textContent.includes('Entry added'));
+    const entryId = (() => {
+      const m = udhHtml().match(/data-entry="([^"]+)"/);
+      return m ? m[1] : null;
+    })();
+    p.el('udhaar-list').dispatch('click',
+      { target: { dataset: { action: 'udhentrydel', person: personId, entry: entryId }, parentElement: null } });
+    await sleep(50);
+    check('D6 UI: first delete tap on an udhaar entry only arms it',
+      udhHtml().includes('Tap again to delete') && udhHtml().includes('Rs 5,000 left'));
+    p.el('udhaar-list').dispatch('click',
+      { target: { dataset: { action: 'udhentrydel', person: personId, entry: entryId }, parentElement: null } });
+    check('D6 UI: second delete tap removes the udhaar entry',
+      await waitFor(() => p.el('udh-entry-ok').textContent.includes('Entry deleted')
+        && udhHtml().includes('No entries for this person yet')));
+    p.el('udhaar-list').dispatch('click',
+      { target: { dataset: { action: 'udhpersondel', person: personId }, parentElement: null } });
+    await sleep(50);
+    check('D6 UI: first delete tap on an udhaar person only arms it',
+      udhHtml().includes('Tap again to delete') && udhHtml().includes('Ahmed'));
+    p.el('udhaar-list').dispatch('click',
+      { target: { dataset: { action: 'udhpersondel', person: personId }, parentElement: null } });
+    check('D6 UI: second delete tap removes the udhaar person',
+      await waitFor(() => p.el('udh-person-ok').textContent.includes('Person deleted')
+        && p.visible('udhaar-empty')));
+    // Imp11: sidebar initials follow the household name (fallback "V").
+    check('Imp11 UI: sidebar initials fall back to "V" with no household name',
+      p.el('sidebar-initials').textContent === 'V');
+    p.ctx.location.hash = '#/profile';
+    p.ctx._dispatchWin('hashchange');
+    p.el('profile-household').value = 'Hashir Home';
+    p.el('profile-save-btn').click();
+    check('Imp11 UI: sidebar initials use the household name\u2019s first letter',
+      await waitFor(() => p.el('profile-ok').textContent.includes('Saved')
+        && p.el('sidebar-initials').textContent === 'H'));
+    // D13: the Add button is disabled while a big photo is shrinking.
+    p.ctx.location.hash = '#/documents';
+    p.ctx._dispatchWin('hashchange');
+    p.el('doc-photo').files = [{ _dataUrl: bigJpeg }];
+    p.el('doc-photo').dispatch('change');
+    check('D13 UI: the Add button is disabled while a photo is shrinking',
+      p.el('doc-add-btn').disabled === true);
+    await sleep(50);
+    check('D13 UI: the Add button is back on after the shrink fails, with a plain error',
+      p.el('doc-add-btn').disabled === false && p.el('doc-add-error').textContent !== '');
+  }
+  // D12: restoring a different book's backup clears the portal account.
+  {
+    const p = portalCtx();
+    await registerIn(p, 'test@example.com', '123456');
+    const other = await V.createVault('654321', '', SAMPLE);
+    const backup = V.createBackup(other.envelope);
+    p.ctx.location.hash = '#/backup';
+    p.ctx._dispatchWin('hashchange');
+    p.el('import-file').files = [{ _text: JSON.stringify(backup) }];
+    p.el('import-file').dispatch('change');
+    check('D12 UI: the backup file reads and asks for its PIN',
+      await waitFor(() => p.el('backup-ok').textContent.includes('Backup file read')));
+    p.el('import-pin').value = '654321';
+    p.el('import-btn').click();
+    check('D12 UI: restoring a different book clears the old login Gmail',
+      await waitFor(() => p.el('backup-ok').textContent.includes('Backup restored')
+        && p.store.get(V.ACCOUNT_KEY) == null));
+    p.ctx.location.hash = '#/profile';
+    p.ctx._dispatchWin('hashchange');
+    check('D12 UI: the Profile page shows no login Gmail after the restore',
+      await waitFor(() => p.visible('profile-login-gmail-none')));
   }
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');
