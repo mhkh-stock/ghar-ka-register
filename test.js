@@ -1607,6 +1607,7 @@ async function main() {
     let mailConfigured = true;
     let portalPin = '123456';
     let setupCount = 0;
+    let setupConflict = false; // D12: the server already has recovery for a different book
     let fakeNow = 1779969600000; // 2026-05-28T12:00:00Z: MIDDAY UTC so the fake local date is May 28 in every timezone (the old 20:26Z instant was May 29 in PKT and broke 13 date-relative UI checks under TZ=Asia/Karachi)
     class FakeDate extends RealDate {
       constructor(...a) { super(...(a.length ? a : [fakeNow])); }
@@ -1650,9 +1651,16 @@ async function main() {
           if (body.rkEnvelope) {
             return ok(200, { ok: true, rkEnvelope: body.rkEnvelope, notifiedOld: true });
           }
+          // D12: the server already has recovery for a different book —
+          // setup answers ALREADY_SET_OTHER_BOOK until the caller
+          // re-binds on purpose (rebind:true).
+          if (setupConflict && !body.rebind) {
+            return ok(409, { ok: false, error: 'ALREADY_SET_OTHER_BOOK' });
+          }
+          if (body.rebind) setupConflict = false;
           setupCount += 1;
           const tag = setupCount === 1 ? 'fake-rk-envelope' : 'fake-rk-envelope-' + setupCount;
-          return ok(200, { ok: true, rkEnvelope: { v: 1, kdf: 'pbkdf2-sha256', iter: 600000, data: tag } });
+          return ok(200, { ok: true, rkEnvelope: { v: 1, kdf: 'pbkdf2-sha256', iter: 600000, data: tag }, rebound: body.rebind === true });
         }
         if (u.endsWith('/api/recover/reset')) {
           const raw = store.get('ghar-register-vault');
@@ -1667,6 +1675,7 @@ async function main() {
       _fetchCalls: fetchCalls,
       _setMailConfigured: (b) => { mailConfigured = b; },
       _setPortalPin: (p) => { portalPin = p; },
+      _setSetupConflict: (b) => { setupConflict = b; },
       FileReader: class {
         readAsText(file) {
           this.result = (file && file._text) || '';
@@ -3043,10 +3052,13 @@ async function main() {
     check('P12 server: setup writes the account binding',
       JSON.parse(fs.readFileSync(acctFile, 'utf8')).gmail === 'otp-setup@example.com');
     const oldKeyBytes = fs.readFileSync(keyFile);
-    check('P12 server: a second setup is refused (409 ALREADY_SET)',
-      (await postJson(PORTAL_BASE, '/api/recover/setup', {
-        gmail: 'otp-setup@example.com', envelope: made.envelope, pin: '123456', passphrase: '',
-      })).status === 409);
+    check('P12 server: a second setup without a spare-envelope proof is refused (409 ALREADY_SET_OTHER_BOOK)',
+      await (async () => {
+        const r = await postJson(PORTAL_BASE, '/api/recover/setup', {
+          gmail: 'otp-setup@example.com', envelope: made.envelope, pin: '123456', passphrase: '',
+        });
+        return r.status === 409 && r.json && r.json.error === 'ALREADY_SET_OTHER_BOOK';
+      })());
     check('P12 server: setup with a wrong PIN is refused',
       await (async () => {
         // Temporarily remove the key file so the ALREADY_SET guard does
@@ -3239,6 +3251,69 @@ async function main() {
       (await getRaw(PORTAL_BASE, '/data/recovery.key')).status === 404);
     check('P12 server: /data/account.json is never served (404)',
       (await getRaw(PORTAL_BASE, '/data/account.json')).status === 404);
+    // D12 wrinkle: restoring a different book's backup leaves the OLD
+    // book's recovery.key + account.json on this PC, and re-linking the
+    // restored book used to hit ALREADY_SET with no way forward. Setup
+    // now answers ALREADY_SET_OTHER_BOOK for a valid different book,
+    // and rebind:true (a deliberate second step) moves recovery to it.
+    const bookA = await V.createVault('111111', '', SAMPLE);
+    const setupA = await postJson(PORTAL_BASE, '/api/recover/setup', {
+      gmail: 'd12-a@example.com', envelope: bookA.envelope, pin: '111111', passphrase: '',
+    });
+    check('D12 server: setup for book A works after recovery was turned off',
+      setupA.json && setupA.json.ok === true && setupA.json.rkEnvelope);
+    const keyABytes = fs.readFileSync(keyFile);
+    const bookB = await V.createVault('222222', '', SAMPLE);
+    const conflict = await postJson(PORTAL_BASE, '/api/recover/setup', {
+      gmail: 'd12-b@example.com', envelope: bookB.envelope, pin: '222222', passphrase: '',
+    });
+    check('D12 server: a different book setup is refused with ALREADY_SET_OTHER_BOOK (409)',
+      conflict.status === 409 && conflict.json && conflict.json.error === 'ALREADY_SET_OTHER_BOOK');
+    check('D12 server: the refused setup leaves the spare key + binding untouched',
+      Buffer.from(fs.readFileSync(keyFile)).toString('hex') === Buffer.from(keyABytes).toString('hex')
+      && JSON.parse(fs.readFileSync(acctFile, 'utf8')).gmail === 'd12-a@example.com');
+    check('D12 server: rebind with a wrong PIN is refused and the key stays',
+      await (async () => {
+        const r = await postJson(PORTAL_BASE, '/api/recover/setup', {
+          gmail: 'd12-b@example.com', envelope: bookB.envelope, pin: '222223', passphrase: '', rebind: true,
+        });
+        return r.status === 400 && r.json.error === 'BAD_CREDENTIALS'
+          && Buffer.from(fs.readFileSync(keyFile)).toString('hex') === Buffer.from(keyABytes).toString('hex');
+      })());
+    check('D12 server: rebind with no envelope is refused and the key stays',
+      await (async () => {
+        const r = await postJson(PORTAL_BASE, '/api/recover/setup', {
+          gmail: 'd12-b@example.com', pin: '222222', passphrase: '', rebind: true,
+        });
+        return r.status === 400 && r.json.error === 'BAD_ENVELOPE'
+          && Buffer.from(fs.readFileSync(keyFile)).toString('hex') === Buffer.from(keyABytes).toString('hex');
+      })());
+    const reb = await postJson(PORTAL_BASE, '/api/recover/setup', {
+      gmail: 'd12-b@example.com', envelope: bookB.envelope, pin: '222222', passphrase: '', rebind: true,
+    });
+    check('D12 server: rebind:true moves recovery to the new book',
+      reb.json && reb.json.ok === true && reb.json.rebound === true && reb.json.rkEnvelope);
+    const keyBBytes = fs.readFileSync(keyFile);
+    check('D12 server: rebind rotates the spare key + updates the binding',
+      Buffer.from(keyBBytes).toString('hex') !== Buffer.from(keyABytes).toString('hex')
+      && JSON.parse(fs.readFileSync(acctFile, 'utf8')).gmail === 'd12-b@example.com');
+    check('D12 server: the new spare envelope opens the new book under the new key',
+      await (async () => {
+        const sk = await V.importSpareKey(keyBBytes);
+        const v = await V.openSpareEnvelope(sk, reb.json.rkEnvelope);
+        return JSON.stringify(v) === JSON.stringify(SAMPLE);
+      })());
+    check('D12 server: the OLD spare envelope does not open under the new key',
+      await (async () => {
+        const sk = await V.importSpareKey(keyBBytes);
+        try { await V.openSpareEnvelope(sk, setupA.json.rkEnvelope); return false; }
+        catch (e) { return e && e.code === 'DECRYPT_FAILED'; }
+      })());
+    check('D12 server: the old book cannot re-bind with a fabricated spare envelope (409)',
+      (await postJson(PORTAL_BASE, '/api/recover/setup', {
+        gmail: 'd12-a@example.com',
+        rkEnvelope: { v: 1, kdf: 'pbkdf2-sha256', iter: 600000, data: 'fabricated' },
+      })).status === 409);
   } finally {
     portalServer.kill();
     unconfServer.kill();
@@ -4273,6 +4348,90 @@ async function main() {
     p.ctx._dispatchWin('hashchange');
     check('D12 UI: the Profile page shows no login Gmail after the restore',
       await waitFor(() => p.visible('profile-login-gmail-none')));
+  }
+  // D12 wrinkle: the restore clears the browser account, but the server
+  // still holds the OLD book's recovery.key + account.json — re-linking
+  // the restored book used to hit ALREADY_SET with no way forward.
+  // First tap prompts (nothing overwritten), second tap re-binds.
+  {
+    const p = portalCtx();
+    await registerIn(p, 'test@example.com', '123456');
+    const other = await V.createVault('654321', '', SAMPLE);
+    const backup = V.createBackup(other.envelope);
+    p.ctx.location.hash = '#/backup';
+    p.ctx._dispatchWin('hashchange');
+    p.el('import-file').files = [{ _text: JSON.stringify(backup) }];
+    p.el('import-file').dispatch('change');
+    await waitFor(() => p.el('backup-ok').textContent.includes('Backup file read'));
+    p.el('import-pin').value = '654321';
+    p.el('import-btn').click();
+    await waitFor(() => p.el('backup-ok').textContent.includes('Backup restored'));
+    // The server still has the OLD book's recovery binding.
+    p.ctx._setSetupConflict(true);
+    p.ctx.location.hash = '#/security';
+    p.ctx._dispatchWin('hashchange');
+    check('D12 UI: after a restore, Security offers to link a Gmail',
+      await waitFor(() => p.el('recovery-status').textContent.includes('no Gmail linked yet')));
+    p.el('security-pin').value = '654321';
+    p.el('recovery-gmail').value = 'test@example.com';
+    p.el('recovery-send-btn').click();
+    await waitFor(() => p.el('recovery-otp-note').textContent.includes('test@example.com'));
+    p.el('recovery-otp').value = '123456';
+    p.el('recovery-verify-btn').click();
+    check('D12 UI: re-linking after a restore prompts instead of failing silently',
+      await waitFor(() => p.el('recovery-error').textContent.includes('already has forgot-code recovery for a different book')));
+    check('D12 UI: the first tap does NOT re-bind (no account saved, no rebind call)',
+      p.store.get(V.ACCOUNT_KEY) == null
+      && !p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/recover/setup') && c.body.rebind === true));
+    p.el('recovery-verify-btn').click();
+    check('D12 UI: the second tap re-binds recovery to the restored book',
+      await waitFor(() => p.el('recovery-ok').textContent.includes('recovery moved to this book')));
+    check('D12 UI: the re-bound account is saved (Gmail + recovery on + spare envelope)',
+      await (async () => {
+        const raw = p.store.get(V.ACCOUNT_KEY);
+        if (!raw) return false;
+        const acct = JSON.parse(raw);
+        return acct.gmail === 'test@example.com' && acct.recoveryOn === true && !!acct.rkEnvelope;
+      })());
+    check('D12 UI: the re-bind call sent rebind:true and skipped the used OTP (fetch log)',
+      p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/recover/setup') && c.body.rebind === true)
+      && p.ctx._fetchCalls.filter((c) => c.url.endsWith('/api/otp/verify') && c.body.purpose === 'link').length === 1);
+  }
+  {
+    // Same re-bind through the migration screen (PIN-only book, asked
+    // to link a Gmail after unlock).
+    const p = portalCtx();
+    p.ctx._setMailConfigured(false);
+    p.el('setup-gmail').value = 'test@example.com';
+    p.el('setup-pin').value = '123456'; p.el('setup-pin2').value = '123456';
+    p.el('setup-btn').click();
+    await waitFor(() => p.visible('setup-fallback-btn'));
+    p.el('setup-fallback-btn').click();
+    await waitFor(() => p.visible('vault-screen'));
+    p.ctx._setSetupConflict(true);
+    p.el('lock-btn').click();
+    p.ctx._setMailConfigured(true);
+    p.el('unlock-pin').value = '123456';
+    p.el('unlock-btn').click();
+    check('D12 UI: migration screen offers Send code after a lock + unlock',
+      await waitFor(() => p.visible('migration-screen') && p.visible('mig-send-btn')));
+    p.el('mig-gmail').value = 'test@example.com';
+    p.el('mig-send-btn').click();
+    await waitFor(() => p.visible('mig-otp-section')
+      && p.el('mig-otp-note').textContent.includes('test@example.com'));
+    p.el('mig-otp').value = '123456';
+    p.el('mig-verify-btn').click();
+    check('D12 UI: migration link prompts to re-bind when the server has another book',
+      await waitFor(() => p.el('mig-error').textContent.includes('already has forgot-code recovery for a different book')));
+    check('D12 UI: the first migration tap does not re-bind (still on migration, no rebind call)',
+      p.visible('migration-screen')
+      && !p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/recover/setup') && c.body.rebind === true));
+    p.el('mig-verify-btn').click();
+    check('D12 UI: the second migration tap re-binds and opens the book',
+      await waitFor(() => p.visible('vault-screen')));
+    check('D12 UI: the migration re-bind saved the account (fetch log + store)',
+      p.ctx._fetchCalls.some((c) => c.url.endsWith('/api/recover/setup') && c.body.rebind === true)
+      && JSON.parse(p.store.get(V.ACCOUNT_KEY)).recoveryOn === true);
   }
 
   console.log('\n' + passed + ' passed, ' + failed + ' failed');

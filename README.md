@@ -153,7 +153,12 @@ code.
   app carry the old `personal-card-vault` label; backups made from
   Phase 5 on carry `ghar-ka-register`. Both restore — the label is
   metadata only. An old **Card Vault** backup still does not open
-  here.
+  here. Restoring a different book's backup clears the login Gmail in
+  the browser, but the server still holds the old book's spare key
+  (`data/recovery.key`) and Gmail binding: linking the restored book
+  first says the PC already has recovery for a different book, and a
+  second tap moves recovery to this book (the old book loses
+  forgot-code recovery).
 
 ## Honest limits (printed in the app, not buried)
 
@@ -204,7 +209,7 @@ any verification claim.
 ```
 node server.js        # serves on 127.0.0.1:3036 (localhost only — nothing on the network can reach it)
 GMAIL_USER=you@gmail.com GMAIL_APP_PASSWORD=xxxx node server.js   # with mail (codes by Gmail)
-node test.js          # tests (844 checks, must print ALL TESTS PASSED)
+node test.js          # tests (869 checks, must print ALL TESTS PASSED)
 ```
 
 Node 24+, zero dependencies. Design: the Code XR "Glassy Payment

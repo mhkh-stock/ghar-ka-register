@@ -43,6 +43,7 @@
     pendingReset: null,       // { token } after the reset OTP verifies
     pendingGmailChange: null, // { gmail } while the change-Gmail OTP step is open
     pendingRecoveryLink: null, // { gmail } while the Security link OTP step is open
+    pendingRebind: null,      // { gmail } while a recovery re-bind is armed (D12)
     migrationCreds: null,     // { pin, pass } — current code, memory only, for setup
     loginGmailCleared: false, // user tapped "Not your Gmail?" on the login screen
     justReset: false,         // show the reset success message after the next unlock
@@ -129,6 +130,25 @@
     if (e === 'BAD_TOKEN') return 'That code has expired or was already used. Request a new code.';
     if (e === 'WRONG_PURPOSE') return 'Could not reset the code — try again.';
     return 'Could not check the code — try again.';
+  }
+  // Plain words for the D12 re-bind prompt, shared by the three link
+  // flows: this PC already has forgot-code recovery for a different
+  // book. The user taps the same button again to move recovery here.
+  var REBIND_PROMPT = 'This PC already has forgot-code recovery for a different book. Tap this button again to move recovery to this book — the other book will lose forgot-code recovery.';
+  // Set up recovery for the open book (shared by migration, Security
+  // link and Security turn-on). Returns { ok, rkEnvelope, rebound } or
+  // { ok:false, error }. ALREADY_SET_OTHER_BOOK means the server
+  // refused and overwrote nothing; the caller arms the re-bind on the
+  // first tap and retries with rebind:true on the second.
+  async function setupRecoveryLink(gmail, envelope, pin, pass, rebind) {
+    var body = { gmail: gmail, envelope: envelope, pin: pin, passphrase: pass };
+    if (rebind) body.rebind = true;
+    var s;
+    try { s = await apiPost('/api/recover/setup', body); }
+    catch (_e) { s = null; }
+    if (!s) return { ok: false, error: 'UNREACHABLE' };
+    if (s.ok && s.json.ok) return { ok: true, rkEnvelope: s.json.rkEnvelope, rebound: s.json.rebound === true };
+    return { ok: false, error: (s.json && s.json.error) || 'FAILED' };
   }
   function loadPortalState() {
     try { state.account = VaultCrypto.loadAccount(); } catch (_e) { state.account = null; }
@@ -482,6 +502,9 @@
   async function onMigrationSend() {
     var gmail = GharModel.normalizeGmail($('mig-gmail').value || '');
     setText('mig-error', '');
+    // A fresh Send starts a fresh OTP round, so any re-bind armed by
+    // an earlier attempt is stale.
+    state.pendingRebind = null;
     if (!gmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gmail)) {
       setText('mig-error', 'Type your Gmail address.');
       return;
@@ -500,8 +523,13 @@
   async function onMigrationVerify() {
     var pm = state.pendingMigration;
     if (!pm) return;
-    var code = $('mig-otp').value.trim();
     setText('mig-error', '');
+    // Re-bind retry (D12): the code was already accepted on the first
+    // tap, so go straight to setup with rebind:true.
+    if (state.pendingRebind && state.pendingRebind.gmail === pm.gmail) {
+      return finishMigrationLink(pm, true);
+    }
+    var code = $('mig-otp').value.trim();
     if (!/^\d{6}$/.test(code)) { setText('mig-error', 'Type the 6-digit code from your Gmail.'); return; }
     var r;
     try { r = await apiPost('/api/otp/verify', { purpose: 'link', gmail: pm.gmail, code: code }); }
@@ -510,22 +538,27 @@
       setText('mig-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
       return;
     }
-    // Link: set up recovery from the unlocked vault (current code +
-    // passphrase, memory only). Book, code, passphrase, data untouched.
+    return finishMigrationLink(pm, false);
+  }
+  // Link: set up recovery from the unlocked vault (current code +
+  // passphrase, memory only). Book, code, passphrase, data untouched.
+  async function finishMigrationLink(pm, rebind) {
     var creds = state.migrationCreds || { pin: '', pass: '' };
-    var s;
-    try {
-      s = await apiPost('/api/recover/setup', {
-        gmail: pm.gmail, envelope: state.envelope, pin: creds.pin, passphrase: creds.pass,
-      });
-    } catch (_e) { s = null; }
-    if (!s || !s.ok || !s.json.ok || !s.json.rkEnvelope) {
+    var s = await setupRecoveryLink(pm.gmail, state.envelope, creds.pin, creds.pass, rebind);
+    if (!s.ok) {
+      if (s.error === 'ALREADY_SET_OTHER_BOOK' && !rebind) {
+        state.pendingRebind = { gmail: pm.gmail };
+        setText('mig-error', REBIND_PROMPT);
+        return;
+      }
+      state.pendingRebind = null;
       setText('mig-error', 'Could not link your Gmail — try again.');
       return;
     }
+    state.pendingRebind = null;
     try {
       VaultCrypto.saveAccount({
-        gmail: pm.gmail, verifiedAt: Date.now(), recoveryOn: true, rkEnvelope: s.json.rkEnvelope,
+        gmail: pm.gmail, verifiedAt: Date.now(), recoveryOn: true, rkEnvelope: s.rkEnvelope,
       });
     } catch (_e) { /* the book still opens without the saved account */ }
     try { VaultCrypto.saveSession(pm.gmail); } catch (_e) { /* optional */ }
@@ -541,6 +574,7 @@
     if (ev && ev.preventDefault) ev.preventDefault();
     state.pendingMigration = null;
     state.migrationCreds = null;
+    state.pendingRebind = null;
     state.portalScreen = null;
     showScreen('vault');
     renderAll();
@@ -2222,6 +2256,7 @@
     setVal('recovery-otp', '');
     state.pendingGmailChange = null;
     state.pendingRecoveryLink = null;
+    state.pendingRebind = null;
   }
   function gmailChangeError(v) {
     if (v === 'NO_GMAIL') return 'Type your Gmail address.';
@@ -2317,6 +2352,9 @@
     setText('recovery-error', '');
     setText('recovery-otp-error', '');
     setText('recovery-ok', '');
+    // A fresh Send starts a fresh OTP round, so any re-bind armed by
+    // an earlier attempt is stale.
+    state.pendingRebind = null;
     var gmail = GharModel.normalizeGmail($('recovery-gmail').value || '');
     if (!gmail || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(gmail)) {
       setText('recovery-error', 'Type your Gmail address.');
@@ -2352,8 +2390,13 @@
   async function onRecoveryVerify() {
     var pl = state.pendingRecoveryLink;
     if (!pl) return;
-    var code = $('recovery-otp').value.trim();
     setText('recovery-otp-error', '');
+    // Re-bind retry (D12): the code was already accepted on the first
+    // tap, so go straight to setup with rebind:true.
+    if (state.pendingRebind && state.pendingRebind.gmail === pl.gmail) {
+      return finishRecoveryLink(pl, true);
+    }
+    var code = $('recovery-otp').value.trim();
     if (!/^\d{6}$/.test(code)) { setText('recovery-otp-error', 'Type the 6-digit code from your Gmail.'); return; }
     var r;
     try { r = await apiPost('/api/otp/verify', { purpose: 'link', gmail: pl.gmail, code: code }); }
@@ -2362,23 +2405,28 @@
       setText('recovery-otp-error', r ? otpErrorText(r.json) : 'Could not reach the server — try again.');
       return;
     }
+    return finishRecoveryLink(pl, false);
+  }
+  async function finishRecoveryLink(pl, rebind) {
     var creds = currentCredentials();
     if (!VaultCrypto.validPin(creds.pin)) { setText('security-error', 'Current PIN must be exactly 6 digits.'); return; }
-    var s;
-    try {
-      s = await apiPost('/api/recover/setup', {
-        gmail: pl.gmail, envelope: state.envelope, pin: creds.pin, passphrase: creds.pass,
-      });
-    } catch (_e) { s = null; }
-    if (!s || !s.ok || !s.json.ok || !s.json.rkEnvelope) {
-      setText('recovery-error', s && s.json && s.json.error === 'BAD_CREDENTIALS'
+    var s = await setupRecoveryLink(pl.gmail, state.envelope, creds.pin, creds.pass, rebind);
+    if (!s.ok) {
+      if (s.error === 'ALREADY_SET_OTHER_BOOK' && !rebind) {
+        state.pendingRebind = { gmail: pl.gmail };
+        setText('recovery-error', REBIND_PROMPT);
+        return;
+      }
+      state.pendingRebind = null;
+      setText('recovery-error', s.error === 'BAD_CREDENTIALS'
         ? 'Current PIN (or passphrase) is wrong.'
         : 'Could not link your Gmail — try again.');
       return;
     }
+    state.pendingRebind = null;
     try {
       VaultCrypto.saveAccount({
-        gmail: pl.gmail, verifiedAt: Date.now(), recoveryOn: true, rkEnvelope: s.json.rkEnvelope,
+        gmail: pl.gmail, verifiedAt: Date.now(), recoveryOn: true, rkEnvelope: s.rkEnvelope,
       });
     } catch (_e) { /* the book still opens without the saved account */ }
     try { VaultCrypto.saveSession(pl.gmail); } catch (_e) { /* optional */ }
@@ -2386,7 +2434,9 @@
     state.pendingRecoveryLink = null;
     clearCredentials();
     fillSecurity();
-    setText('recovery-ok', 'Gmail linked. Forgot-code recovery is on.');
+    setText('recovery-ok', s.rebound
+      ? 'Gmail linked. Forgot-code recovery moved to this book.'
+      : 'Gmail linked. Forgot-code recovery is on.');
   }
   async function onRecoveryResend() {
     var pl = state.pendingRecoveryLink;
@@ -2408,27 +2458,33 @@
     if (!acct || !acct.gmail) return;
     var creds = currentCredentials();
     if (!VaultCrypto.validPin(creds.pin)) { setText('security-error', 'Current PIN must be exactly 6 digits.'); return; }
-    var s;
-    try {
-      s = await apiPost('/api/recover/setup', {
-        gmail: acct.gmail, envelope: state.envelope, pin: creds.pin, passphrase: creds.pass,
-      });
-    } catch (_e) { s = null; }
-    if (!s || !s.ok || !s.json.ok || !s.json.rkEnvelope) {
-      setText('recovery-error', s && s.json && s.json.error === 'BAD_CREDENTIALS'
+    // Re-bind retry (D12): a second tap sends rebind:true.
+    var rebind = !!(state.pendingRebind && state.pendingRebind.gmail === acct.gmail);
+    var s = await setupRecoveryLink(acct.gmail, state.envelope, creds.pin, creds.pass, rebind);
+    if (!s.ok) {
+      if (s.error === 'ALREADY_SET_OTHER_BOOK' && !rebind) {
+        state.pendingRebind = { gmail: acct.gmail };
+        setText('recovery-error', REBIND_PROMPT);
+        return;
+      }
+      state.pendingRebind = null;
+      setText('recovery-error', s.error === 'BAD_CREDENTIALS'
         ? 'Current PIN (or passphrase) is wrong.'
         : 'Could not turn recovery on — try again.');
       return;
     }
+    state.pendingRebind = null;
     try {
       VaultCrypto.saveAccount({
-        gmail: acct.gmail, verifiedAt: acct.verifiedAt || Date.now(), recoveryOn: true, rkEnvelope: s.json.rkEnvelope,
+        gmail: acct.gmail, verifiedAt: acct.verifiedAt || Date.now(), recoveryOn: true, rkEnvelope: s.rkEnvelope,
       });
     } catch (_e) { /* the book still opens without the saved account */ }
     loadPortalState();
     clearCredentials();
     fillSecurity();
-    setText('recovery-ok', 'Forgot-code recovery is on again.');
+    setText('recovery-ok', s.rebound
+      ? 'Forgot-code recovery is on again, moved to this book.'
+      : 'Forgot-code recovery is on again.');
   }
   async function onRecoveryOff() {
     setText('recovery-error', '');
@@ -2528,7 +2584,9 @@
       // (login Gmail + spare envelope) belonged to the old one. Clear
       // it, so Profile stops showing the old Gmail and a later reset
       // does not try the wrong spare envelope. The book must be linked
-      // again from Security.
+      // again from Security; linking there first says the PC still has
+      // the old book's recovery, and a second tap moves recovery to
+      // this book (the D12 re-bind).
       state.account = null;
       VaultCrypto.clearAccount();
       state.lockout = VaultCrypto.recordSuccess();

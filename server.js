@@ -233,11 +233,21 @@ async function handleOtpVerify(req, res) {
 // sees the spare key — the server must create the spare envelope, so
 // it needs the unlocked vault. This mirrors the plan-approved reset
 // pattern, where the new code travels to the local server.)
-// Refuses (409) if a spare key already exists AND the caller cannot
-// prove the same book — a second book cannot silently overwrite the
-// first book's spare key. The one allowed call while a key exists is
-// a Gmail change (Phase 4): current spare envelope + a token from an
-// OTP sent to the NEW Gmail. The spare key and spare envelope are
+// A spare key already exists AND the caller cannot prove the same
+// book (no spare envelope that opens under it): that is either the
+// same book re-linking without its envelope, or — the D12 case — a
+// DIFFERENT book restored from a backup, whose old recovery.key +
+// account.json are still on this PC. The caller must prove the new
+// book (its PIN + passphrase open its envelope); then the server
+// answers 409 ALREADY_SET_OTHER_BOOK and overwrites NOTHING. The
+// browser shows that in plain words and only re-binds on a deliberate
+// second step (rebind:true), which replaces the spare key + binding
+// with a fresh pair for this book. A local caller could delete the
+// key file by hand anyway; the guard is against silent overwrites,
+// not against the machine's owner.
+// The one allowed call while a key exists with a spare-envelope proof
+// is a Gmail change (Phase 4): current spare envelope + a token from
+// an OTP sent to the NEW Gmail. The spare key and spare envelope are
 // NOT affected by a Gmail change; the old Gmail gets a plain notice.
 async function handleRecoverSetup(req, res) {
   let body;
@@ -251,39 +261,72 @@ async function handleRecoverSetup(req, res) {
   if (existingSpare) {
     // Gmail change for the same book: prove the book with the current
     // spare envelope (it opens under the existing spare key).
-    if (!body.rkEnvelope || typeof body.rkEnvelope !== 'object') {
-      return sendJson(res, 409, { ok: false, error: 'ALREADY_SET' });
-    }
-    let spareVault;
-    try {
-      const spareKey = await VaultCrypto.importSpareKey(existingSpare);
-      spareVault = await VaultCrypto.openSpareEnvelope(spareKey, body.rkEnvelope);
-    } catch (_e) {
-      return sendJson(res, 409, { ok: false, error: 'ALREADY_SET' });
-    }
-    if (!GharModel.isGharVault(spareVault)) {
-      return sendJson(res, 409, { ok: false, error: 'ALREADY_SET' });
-    }
-    // The spare-envelope proof runs BEFORE the token is consumed, so a
-    // change that fails closed does not burn a valid token.
-    const t = Otp.consumeToken(otpStore, body.token, 'change-gmail', Date.now());
-    if (!t.ok) return sendJson(res, 200, { ok: false, error: t.error });
-    if (t.gmail !== gmail) return sendJson(res, 200, { ok: false, error: 'BAD_TOKEN' });
-    const oldGmail = readAccountGmail();
-    writeAccountGmail(gmail);
-    // Plain notice to the OLD Gmail (no code in it). Best effort: the
-    // change itself already happened; a failed notice never blocks it.
-    let notifiedOld = false;
-    if (oldGmail && oldGmail !== gmail) {
+    if (body.rkEnvelope && typeof body.rkEnvelope === 'object') {
+      let spareVault;
       try {
-        await Mail.sendMail(oldGmail, 'Ghar ka Register — login Gmail changed',
-          'Your Ghar ka Register login Gmail was changed to ' + gmail + '.\n'
-          + '\n'
-          + 'If this was not you, open the book and change it back in Security.');
-        notifiedOld = true;
-      } catch (_e) { notifiedOld = false; }
+        const spareKey = await VaultCrypto.importSpareKey(existingSpare);
+        spareVault = await VaultCrypto.openSpareEnvelope(spareKey, body.rkEnvelope);
+      } catch (_e) {
+        return sendJson(res, 409, { ok: false, error: 'ALREADY_SET' });
+      }
+      if (!GharModel.isGharVault(spareVault)) {
+        return sendJson(res, 409, { ok: false, error: 'ALREADY_SET' });
+      }
+      // The spare-envelope proof runs BEFORE the token is consumed, so a
+      // change that fails closed does not burn a valid token.
+      const t = Otp.consumeToken(otpStore, body.token, 'change-gmail', Date.now());
+      if (!t.ok) return sendJson(res, 200, { ok: false, error: t.error });
+      if (t.gmail !== gmail) return sendJson(res, 200, { ok: false, error: 'BAD_TOKEN' });
+      const oldGmail = readAccountGmail();
+      writeAccountGmail(gmail);
+      // Plain notice to the OLD Gmail (no code in it). Best effort: the
+      // change itself already happened; a failed notice never blocks it.
+      let notifiedOld = false;
+      if (oldGmail && oldGmail !== gmail) {
+        try {
+          await Mail.sendMail(oldGmail, 'Ghar ka Register — login Gmail changed',
+            'Your Ghar ka Register login Gmail was changed to ' + gmail + '.\n'
+            + '\n'
+            + 'If this was not you, open the book and change it back in Security.');
+          notifiedOld = true;
+        } catch (_e) { notifiedOld = false; }
+      }
+      return sendJson(res, 200, { ok: true, rkEnvelope: body.rkEnvelope, notifiedOld });
     }
-    return sendJson(res, 200, { ok: true, rkEnvelope: body.rkEnvelope, notifiedOld });
+    // No spare-envelope proof: prove the calling book instead (its PIN
+    // + passphrase must open its envelope), then either refuse with
+    // ALREADY_SET_OTHER_BOOK (first step — nothing overwritten) or
+    // re-bind on a deliberate second step (rebind:true — fresh spare
+    // key + binding for this book; the old book loses forgot-code).
+    if (!VaultCrypto.validPin(body.pin) || !VaultCrypto.validPassphrase(body.passphrase || '')) {
+      return sendJson(res, 400, { ok: false, error: 'BAD_CREDENTIALS' });
+    }
+    if (!body.envelope || typeof body.envelope !== 'object') {
+      return sendJson(res, 400, { ok: false, error: 'BAD_ENVELOPE' });
+    }
+    let vaultObj;
+    try {
+      const res2 = await VaultCrypto.unlockVault(body.pin, body.passphrase || '', body.envelope);
+      vaultObj = res2.vault;
+    } catch (_e) {
+      return sendJson(res, 400, { ok: false, error: 'BAD_CREDENTIALS' });
+    }
+    if (!GharModel.isGharVault(vaultObj)) {
+      return sendJson(res, 400, { ok: false, error: 'BAD_ENVELOPE' });
+    }
+    if (body.rebind !== true) {
+      return sendJson(res, 409, { ok: false, error: 'ALREADY_SET_OTHER_BOOK' });
+    }
+    const spareBytes = VaultCrypto.randomSpareKey();
+    try {
+      writeSpareKeyBytes(spareBytes);
+      writeAccountGmail(gmail);
+      const spareKey = await VaultCrypto.importSpareKey(spareBytes);
+      const rkEnvelope = await VaultCrypto.createSpareEnvelope(spareKey, vaultObj);
+      return sendJson(res, 200, { ok: true, rkEnvelope, rebound: true });
+    } catch (_e) {
+      return sendJson(res, 500, { ok: false, error: 'SETUP_FAILED' });
+    }
   }
   if (!VaultCrypto.validPin(body.pin) || !VaultCrypto.validPassphrase(body.passphrase || '')) {
     return sendJson(res, 400, { ok: false, error: 'BAD_CREDENTIALS' });
